@@ -91,15 +91,16 @@ func TestFormatRemaining(t *testing.T) {
 	}
 }
 
-func TestRunnerPollsUntilAvailableAndStoresPayment(t *testing.T) {
-	var detailCalls atomic.Int32
+func TestRunnerStartsOrderFlowWithoutTicketStatusCheck(t *testing.T) {
+	var statusCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/mall-search-items/items_detail/info":
-			call := detailCalls.Add(1)
-			writeRunnerJSON(t, w, ticketDetailPayload(call >= 2))
+			statusCalls.Add(1)
+			writeRunnerJSON(t, w, ticketDetailPayload(false))
 		case "/api/ticket/linkgoods/list":
+			statusCalls.Add(1)
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
 		case "/api/ticket/order/prepare":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
@@ -142,8 +143,8 @@ func TestRunnerPollsUntilAvailableAndStoresPayment(t *testing.T) {
 	if updated.TimeSyncedAt == "" {
 		t.Fatal("TimeSyncedAt is empty")
 	}
-	if detailCalls.Load() < 2 {
-		t.Fatalf("detail calls = %d, want at least 2", detailCalls.Load())
+	if statusCalls.Load() != 0 {
+		t.Fatalf("ticket status calls = %d, want 0", statusCalls.Load())
 	}
 }
 

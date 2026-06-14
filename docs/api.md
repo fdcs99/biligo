@@ -517,7 +517,7 @@
 | --- | --- |
 | `draft` | 草稿，已创建但未下发 |
 | `waiting_start` | 已下发，等待票档起售时间 |
-| `running` | 正在检测票档并尝试订单流程；运行中的接口错误会记录日志并继续重试 |
+| `running` | 已到起售时间，正在直接尝试订单流程；运行中的接口错误会记录日志并继续重试 |
 | `waiting_payment` | 已创建订单，等待用户支付 |
 | `succeeded` | 订单接口成功但没有可展示的支付二维码 |
 | `duplicate_order` | 检测到重复订单 |
@@ -615,7 +615,7 @@
 
 ### POST `/api/tasks/{id}/dispatch`
 
-下发任务。后端会先按任务的 `timeSyncStrategy` 同步时间，并写入 `timeOffsetMillis` 与 `timeSyncedAt`；随后启动内置任务运行器，使用“本地时间 + offset”等待票档起售时间，并按 `pollIntervalSeconds` 检测票档状态。检测到可购买后会调用订单准备、订单创建和支付参数接口；成功后进入 `waiting_payment`。
+下发任务。后端会先按任务的 `timeSyncStrategy` 同步时间，并写入 `timeOffsetMillis` 与 `timeSyncedAt`；随后启动内置任务运行器，使用“本地时间 + offset”等待票档起售时间。到达起售时间后不再额外检测票档状态，而是直接调用订单准备、订单创建和支付参数接口；运行中的接口错误会按 `pollIntervalSeconds` 继续重试，成功后进入 `waiting_payment`。
 
 响应：
 

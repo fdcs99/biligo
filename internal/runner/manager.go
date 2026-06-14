@@ -155,7 +155,7 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 		return
 	}
 
-	m.setRuntime(taskID, "running", "已到起售时间，开始检测票档状态。", "info")
+	m.setRuntime(taskID, "running", "已到起售时间，开始准备订单。", "info")
 	interval := time.Duration(task.PollIntervalSeconds) * time.Second
 	if interval <= 0 {
 		interval = 3 * time.Second
@@ -174,23 +174,8 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 		if err != nil {
 			return
 		}
-		option, available, err := m.ticket.CheckTicketStatus(ctx, latestTask, cookie)
 		checkedAt := time.Now().Format(time.RFC3339)
-		if err != nil {
-			if !m.retryRunError(ctx, taskID, "检测票档状态失败："+err.Error(), checkedAt, interval) {
-				return
-			}
-			continue
-		}
-		if !available {
-			m.setRuntimeWithCheckedAt(taskID, "running", fmt.Sprintf("票档状态：%s，继续等待。", firstNonEmpty(option.SaleStatus, "未知状态")), "info", checkedAt)
-			if !m.wait(ctx, interval) {
-				return
-			}
-			continue
-		}
 
-		m.setRuntimeWithCheckedAt(taskID, "running", "票档可购买，开始准备订单。", "info", checkedAt)
 		prepared, err := m.ticket.PrepareOrder(ctx, latestTask, cookie)
 		if err != nil {
 			if !m.retryRunError(ctx, taskID, "订单准备失败："+err.Error(), checkedAt, interval) {
