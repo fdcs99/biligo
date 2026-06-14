@@ -110,6 +110,8 @@ const selectedTask = computed(() => tasks.value.find((task) => task.id === selec
 const selectedTaskTicketSubtitle = computed(() =>
   selectedTask.value ? taskTicketSummary(selectedTask.value) : '',
 )
+const pendingTasks = computed(() => tasks.value.filter((task) => task.status === 'draft' || task.status === 'paused'))
+const dispatchedTasks = computed(() => tasks.value.filter((task) => task.status !== 'draft' && task.status !== 'paused'))
 const selectedTicketOption = computed(() =>
   ticketOptions.value.find((ticket) => ticket.value === selectedTicketValue.value),
 )
@@ -1255,27 +1257,61 @@ onUnmounted(() => {
           </button>
         </form>
 
-        <section class="panel list-panel">
-          <div class="panel-heading">
-            <h3>待下发任务</h3>
-            <span class="muted">{{ tasks.length }} 个任务</span>
-          </div>
-          <article v-for="task in tasks" :key="task.id" class="item-card">
-            <div>
-              <h4>{{ task.name }}</h4>
-              <p>{{ task.projectName || '未选择项目' }} · {{ task.accountName || '未选择账号' }}</p>
-              <small>{{ task.ticketDisplay || `${task.sessionName || '-'} / ${task.ticketLevel || '-'}` }} / {{ task.quantity }} 张</small>
+        <div class="stack-column">
+          <section class="panel list-panel">
+            <div class="panel-heading">
+              <h3>待下发任务</h3>
+              <span class="muted">{{ pendingTasks.length }} 个任务</span>
             </div>
-            <div class="actions">
-              <span :class="['status-pill', taskStatusClass(task.status)]">
-                {{ statusLabel(task.status) }}
-              </span>
-              <button type="button" @click="editTask(task)">编辑</button>
-              <button type="button" class="primary-button compact" @click="dispatchTask(task.id)">下发</button>
+            <article v-for="task in pendingTasks" :key="task.id" class="item-card">
+              <div>
+                <h4>{{ task.name }}</h4>
+                <p>{{ task.projectName || '未选择项目' }} · {{ task.accountName || '未选择账号' }}</p>
+                <small>{{ taskTicketSummary(task) }}</small>
+                <small>{{ taskBuyerSummary(task) }}</small>
+              </div>
+              <div class="actions">
+                <span :class="['status-pill', taskStatusClass(task.status)]">
+                  {{ statusLabel(task.status) }}
+                </span>
+                <button type="button" @click="editTask(task)">编辑</button>
+                <button type="button" class="primary-button compact" @click="dispatchTask(task.id)">下发</button>
+                <button v-if="task.status === 'draft'" type="button" class="danger-button" @click="deleteTask(task.id)">删除</button>
+              </div>
+            </article>
+            <p v-if="pendingTasks.length === 0" class="empty">暂无待下发任务</p>
+          </section>
+
+          <section class="panel list-panel">
+            <div class="panel-heading">
+              <h3>已下发任务</h3>
+              <span class="muted">{{ dispatchedTasks.length }} 个任务</span>
             </div>
-          </article>
-          <p v-if="tasks.length === 0" class="empty">暂无任务</p>
-        </section>
+            <article v-for="task in dispatchedTasks" :key="task.id" class="item-card">
+              <div>
+                <h4>{{ task.name }}</h4>
+                <p>{{ task.projectName || '未选择项目' }} · {{ task.accountName || '未选择账号' }}</p>
+                <small>{{ taskTicketSummary(task) }}</small>
+                <small>{{ taskBuyerSummary(task) }}</small>
+              </div>
+              <div class="actions">
+                <span :class="['status-pill', taskStatusClass(task.status)]">
+                  {{ statusLabel(task.status) }}
+                </span>
+                <button
+                  type="button"
+                  disabled
+                  title="请先停止任务后再编辑"
+                  @click="editTask(task)"
+                >
+                  编辑
+                </button>
+                <button type="button" @click="stopTask(task.id)">停止</button>
+              </div>
+            </article>
+            <p v-if="dispatchedTasks.length === 0" class="empty">暂无已下发任务</p>
+          </section>
+        </div>
       </section>
 
       <section v-if="activeSection === 'taskStatus'" class="status-layout">
