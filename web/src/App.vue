@@ -1262,6 +1262,7 @@ onUnmounted(() => {
               <input :value="taskForm.saleStart" disabled />
             </label>
           </div>
+          <p class="field-hint">不填写则默认开票后 10 分钟停止。</p>
           <button type="submit" class="primary-button" :disabled="loading || !canSaveTask">
             保存任务
           </button>
