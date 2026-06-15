@@ -67,6 +67,20 @@ func (m *Manager) Validate(token string) (time.Time, bool) {
 	return expiresAt, true
 }
 
+func (m *Manager) Revoke(token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.tokens[token]; !ok {
+		return false
+	}
+	delete(m.tokens, token)
+	return true
+}
+
 func (m *Manager) passwordMatches(password string) bool {
 	expected := []byte(m.password)
 	actual := []byte(strings.TrimSpace(password))

@@ -34,3 +34,20 @@ func TestManagerLoginValidateAndExpire(t *testing.T) {
 		t.Fatal("expired token should not validate")
 	}
 }
+
+func TestManagerRevoke(t *testing.T) {
+	manager := NewManager("secret", time.Hour)
+	token, _, ok, err := manager.Login("secret")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if !ok {
+		t.Fatal("login failed")
+	}
+	if !manager.Revoke(token) {
+		t.Fatal("Revoke should return true for active token")
+	}
+	if _, ok := manager.Validate(token); ok {
+		t.Fatal("revoked token should not validate")
+	}
+}

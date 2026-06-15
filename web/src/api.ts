@@ -333,6 +333,7 @@ export const api = {
       skipUnauthorizedHandler: true,
     }),
   panelSession: () => request<PanelAuthResponse>('/api/panel-auth/session', { skipUnauthorizedHandler: true }),
+  panelLogout: () => request<void>('/api/panel-auth/logout', { method: 'POST', skipUnauthorizedHandler: true }),
   session: () => request<SessionSummary>('/api/auth/session'),
   startQRLogin: () =>
     request<QRLoginStartResponse>('/api/auth/qr/start', { method: 'POST' }),

@@ -247,9 +247,17 @@ async function bootConsole() {
   startClock()
 }
 
-function logoutPanel() {
-  clearPanelSession()
-  notice.value = '已退出面板登录'
+async function logoutPanel() {
+  try {
+    if (getPanelAuthToken()) {
+      await api.panelLogout()
+    }
+  } catch {
+    // Local logout should still work if the server token already expired.
+  } finally {
+    clearPanelSession()
+    notice.value = '已退出面板登录'
+  }
 }
 
 function handlePanelUnauthorized() {

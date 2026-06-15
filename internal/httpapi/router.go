@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/fdcs99/biligo/internal/applog"
 	"github.com/fdcs99/biligo/internal/biliauth"
 	"github.com/fdcs99/biligo/internal/biliticket"
 	"github.com/fdcs99/biligo/internal/events"
@@ -27,16 +30,19 @@ type Handler struct {
 	hub    *events.Hub
 	runner *runner.Manager
 	panel  *panelauth.Manager
+	logger *applog.Logger
 }
 
-func NewRouter(store *store.Store, panel *panelauth.Manager) *gin.Engine {
-	router := gin.Default()
+func NewRouter(store *store.Store, panel *panelauth.Manager, logger *applog.Logger) *gin.Engine {
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
 	router.Use(devCORS())
+	router.Use(recovery(logger))
 	if panel == nil {
 		panel = panelauth.NewManager("", 24*time.Hour)
 	}
 
-	hub := events.NewHub()
+	hub := events.NewHub(logger)
 	ticket := biliticket.NewClient(nil)
 	handler := &Handler{
 		store:  store,
@@ -45,6 +51,7 @@ func NewRouter(store *store.Store, panel *panelauth.Manager) *gin.Engine {
 		hub:    hub,
 		runner: runner.NewManager(store, ticket, hub),
 		panel:  panel,
+		logger: logger,
 	}
 	api := router.Group("/api")
 	{
@@ -55,6 +62,7 @@ func NewRouter(store *store.Store, panel *panelauth.Manager) *gin.Engine {
 		protected.Use(handler.requirePanelAuth())
 		{
 			protected.GET("/panel-auth/session", handler.panelSession)
+			protected.POST("/panel-auth/logout", handler.panelLogout)
 
 			protected.GET("/events", handler.events)
 			protected.GET("/auth/session", handler.sessionSummary)
@@ -101,6 +109,15 @@ func devCORS() gin.HandlerFunc {
 	}
 }
 
+func recovery(logger *applog.Logger) gin.HandlerFunc {
+	return gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, recovered any) {
+		if logger != nil {
+			logger.Errorf("HTTP 请求处理异常：%v", recovered)
+		}
+		c.AbortWithStatus(http.StatusInternalServerError)
+	})
+}
+
 func (h *Handler) health(c *gin.Context) {
 	status := model.Health{
 		Status:   "ok",
@@ -130,6 +147,9 @@ func (h *Handler) panelLogin(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "面板密码错误"})
 		return
 	}
+	if h.logger != nil {
+		h.logger.Infof("面板登录成功，客户端 %s，token 有效期至 %s。", clientIP(c), expiresAt.Format(time.RFC3339))
+	}
 	c.JSON(http.StatusOK, model.PanelAuthResponse{
 		Token:     token,
 		ExpiresAt: expiresAt.Format(time.RFC3339),
@@ -145,6 +165,18 @@ func (h *Handler) panelSession(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusUnauthorized, gin.H{"error": "面板登录已失效"})
+}
+
+func (h *Handler) panelLogout(c *gin.Context) {
+	revoked := h.panel.Revoke(panelTokenFromRequest(c))
+	if h.logger != nil {
+		if revoked {
+			h.logger.Infof("面板退出登录成功，客户端 %s。", clientIP(c))
+		} else {
+			h.logger.Warnf("面板退出登录请求未匹配有效 token，客户端 %s。", clientIP(c))
+		}
+	}
+	c.Status(http.StatusNoContent)
 }
 
 func (h *Handler) requirePanelAuth() gin.HandlerFunc {
@@ -166,6 +198,17 @@ func panelTokenFromRequest(c *gin.Context) string {
 		return strings.TrimSpace(authHeader[len("bearer "):])
 	}
 	return strings.TrimSpace(c.Query("token"))
+}
+
+func clientIP(c *gin.Context) string {
+	if ip := strings.TrimSpace(c.ClientIP()); ip != "" {
+		return ip
+	}
+	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	if err == nil && host != "" {
+		return host
+	}
+	return firstNonEmpty(c.Request.RemoteAddr, "unknown")
 }
 
 func (h *Handler) events(c *gin.Context) {

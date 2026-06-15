@@ -7,3 +7,12 @@ database:
 auth:
   # Panel password. Leave empty to generate and write one on server startup.
   password: ""
+
+logging:
+  # Available levels: info, warn, error. Use "none" to disable application logs.
+  levels:
+    - info
+    - warn
+    - error
+  # Console color mode: auto, always, never.
+  color: auto

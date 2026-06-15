@@ -84,6 +84,12 @@
 }
 ```
 
+### POST `/api/panel-auth/logout`
+
+退出当前面板登录，会使当前 Bearer Token 立即失效。该接口需要 `Authorization: Bearer <token>`。
+
+响应：`204 No Content`。
+
 ## 账号管理
 
 ### GET `/api/auth/session`
