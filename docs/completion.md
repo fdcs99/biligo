@@ -8,6 +8,28 @@
 - 每条记录包含：日期、类型、摘要、主要变更、验收情况、遗留事项。
 - 只记录已经完成或明确决策的内容，不记录未确认的想法。
 
+## 2026-06-15 VS Code pnpm 任务完善
+
+类型：开发环境调整
+
+摘要：VS Code 前端任务统一使用 pnpm，补齐安装、构建和预览入口。
+
+主要变更：
+
+- `web: dev` 改为显式执行 `pnpm dev`。
+- 新增 `web: install`，执行 `pnpm install --frozen-lockfile`。
+- 新增 `web: build`，执行 `pnpm build`。
+- 新增 `web: preview`，执行 `pnpm preview`。
+
+验收情况：
+
+- 已通过 `.vscode/tasks.json` JSON 解析检查。
+- 已通过 `git diff --check`。
+
+遗留事项：
+
+- 本地需要安装 pnpm，VS Code 调试任务才能直接运行。
+
 ## 2026-06-15 Embed 前端同端口接入
 
 类型：打包部署增强

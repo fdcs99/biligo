@@ -4,7 +4,8 @@
     {
       "label": "web: dev",
       "type": "shell",
-      "command": "pnpm dev",
+      "command": "pnpm",
+      "args": ["dev"],
       "options": {
         "cwd": "${workspaceFolder}/web"
       },
@@ -17,6 +18,63 @@
         "background": {
           "activeOnStart": true,
           "beginsPattern": "VITE v|vite v|Local:",
+          "endsPattern": "Local:|ready in"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "web: install",
+      "type": "shell",
+      "command": "pnpm",
+      "args": ["install", "--frozen-lockfile"],
+      "options": {
+        "cwd": "${workspaceFolder}/web"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "web: build",
+      "type": "shell",
+      "command": "pnpm",
+      "args": ["build"],
+      "options": {
+        "cwd": "${workspaceFolder}/web"
+      },
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "web: preview",
+      "type": "shell",
+      "command": "pnpm",
+      "args": ["preview"],
+      "options": {
+        "cwd": "${workspaceFolder}/web"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "vite-preview",
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "vite preview|Local:",
           "endsPattern": "Local:|ready in"
         }
       },
