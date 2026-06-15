@@ -1,0 +1,167 @@
+name: Build Release Artifacts
+
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os_name }} ${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            os_name: windows
+            goarch: amd64
+            binary_ext: .exe
+            archive_ext: zip
+          - goos: linux
+            os_name: linux
+            goarch: amd64
+            binary_ext: ""
+            archive_ext: tar.gz
+          - goos: linux
+            os_name: linux
+            goarch: arm64
+            binary_ext: ""
+            archive_ext: tar.gz
+          - goos: darwin
+            os_name: macos
+            goarch: amd64
+            binary_ext: ""
+            archive_ext: tar.gz
+          - goos: darwin
+            os_name: macos
+            goarch: arm64
+            binary_ext: ""
+            archive_ext: tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.6.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Resolve Version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ -n "$RELEASE_TAG" ]; then
+            version="$RELEASE_TAG"
+          else
+            version=""
+          fi
+
+          if [ -n "$version" ]; then
+            safe_version="$(printf '%s' "$version" | sed 's/[^A-Za-z0-9._-]/_/g')"
+            package_version="_$safe_version"
+          else
+            safe_version=""
+            package_version=""
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "safe_version=$safe_version" >> "$GITHUB_OUTPUT"
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Frontend Dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Frontend
+        working-directory: web
+        run: pnpm build
+
+      - name: Prepare Embedded Frontend
+        run: |
+          rm -rf internal/webui/dist
+          mkdir -p internal/webui/dist
+          cp -R web/dist/. internal/webui/dist/
+
+      - name: Install Windows Resource Tool
+        if: matrix.goos == 'windows'
+        run: go install github.com/akavel/rsrc@v0.10.2
+
+      - name: Prepare Windows Icon Resource
+        if: matrix.goos == 'windows'
+        run: |
+          "$(go env GOPATH)/bin/rsrc" \
+            -arch "${{ matrix.goarch }}" \
+            -ico assets/logo.ico \
+            -o "cmd/server/rsrc_windows_${{ matrix.goarch }}.syso"
+
+      - name: Build Binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p build/bin
+          go build \
+            -tags embed_web \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o "build/bin/biligo${{ matrix.binary_ext }}" \
+            ./cmd/server
+
+      - name: Package Artifact
+        id: package
+        run: |
+          package_name="biligo${{ steps.version.outputs.package_version }}_${{ matrix.os_name }}_${{ matrix.goarch }}"
+          package_dir="build/$package_name"
+
+          mkdir -p "$package_dir"
+          cp "build/bin/biligo${{ matrix.binary_ext }}" "$package_dir/"
+          cp readme.md config.example.yaml "$package_dir/"
+          if [ -f LICENSE ]; then
+            cp LICENSE "$package_dir/"
+          fi
+
+          if [ "${{ matrix.archive_ext }}" = "zip" ]; then
+            asset_path="build/$package_name.zip"
+            (cd build && zip -r "$package_name.zip" "$package_name")
+          else
+            asset_path="build/$package_name.tar.gz"
+            (cd build && tar -czf "$package_name.tar.gz" "$package_name")
+          fi
+
+          echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
+          echo "asset_path=$asset_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.package_name }}
+          path: ${{ steps.package.outputs.asset_path }}
+          if-no-files-found: error
+
+      - name: Upload Release Asset
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.asset_path }}

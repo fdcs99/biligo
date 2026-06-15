@@ -8,21 +8,49 @@
 - 每条记录包含：日期、类型、摘要、主要变更、验收情况、遗留事项。
 - 只记录已经完成或明确决策的内容，不记录未确认的想法。
 
+## 2026-06-15 GitHub Actions 自动检查与发布构建
+
+类型：工程自动化
+
+摘要：新增 GitHub Actions 工作流，覆盖 push/PR 检查、手动构建和 Release 自动上传产物。
+
+主要变更：
+
+- 新增 `.github/workflows/check.yml`，在所有分支的 push 和 pull request 时运行 Go 测试、前端构建、嵌入前端测试和空白差异检查。
+- 新增 `.github/workflows/build.yml`，支持手动触发构建 Windows、Linux、macOS 产物，手动构建产物名不带版本号。
+- Release 发布时自动构建并上传产物，文件名包含版本号、系统和架构。
+- 发布产物使用 `embed_web` 构建，前端页面和 API 由同一个二进制提供。
+- Windows 产物会在 CI 中使用仓库内的 `assets/logo.ico` 生成资源文件，并嵌入到 `.exe`。
+
+验收情况：
+
+- 已通过 GitHub Actions YAML 解析检查。
+- 已通过 `go test ./...`。
+- 已通过 `pnpm build`。
+- 已通过 `go test -tags embed_web ./...`。
+- 已通过 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags embed_web -trimpath -ldflags="-s -w" ./cmd/server`。
+- 已通过使用 `assets/logo.ico` 的 `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -tags embed_web`。
+- 已通过 `git diff --check`。
+
+遗留事项：
+
+- GitHub Actions 需要推送到远端后由 GitHub 运行验证。
+
 ## 2026-06-15 品牌图标接入
 
 类型：界面与资源调整
 
-摘要：接入 Biligo 项目 logo，使用压缩后的 PNG 补齐 README 展示和 Web 标签页图标。
+摘要：接入 Biligo 项目 logo，使用压缩后的 PNG 补齐 README 展示和 Web 标签页图标，并提供 Windows ICO 图标资源。
 
 主要变更：
 
 - 新增压缩后的 `assets/logo.png`，作为 README 中展示的项目 logo。
 - 新增 `web/public/favicon.png`，并在 `web/index.html` 中注册为网页图标。
-- 不再保留 ICO 图标文件。
 
 验收情况：
 
 - 已验证 `assets/logo.png` 和 `web/public/favicon.png` 为 512x512 PNG 文件。
+- 已验证 `assets/logo.ico` 为 256x256 ICO 文件。
 - 已通过 `pnpm build`。
 - 已通过 `git diff --check`。
 

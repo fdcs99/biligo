@@ -1,0 +1,59 @@
+name: Check
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+
+jobs:
+  check:
+    name: Test And Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.6.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install Frontend Dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Go Tests
+        run: go test ./...
+
+      - name: Build Frontend
+        working-directory: web
+        run: pnpm build
+
+      - name: Prepare Embedded Frontend
+        run: |
+          rm -rf internal/webui/dist
+          mkdir -p internal/webui/dist
+          cp -R web/dist/. internal/webui/dist/
+
+      - name: Run Embedded Go Tests
+        run: go test -tags embed_web ./...
+
+      - name: Check Diff Whitespace
+        run: git diff --check
