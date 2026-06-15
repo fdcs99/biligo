@@ -49,6 +49,31 @@ p {
   background: #f5f4ef;
 }
 
+.auth-shell {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px;
+  background: #f5f4ef;
+}
+
+.auth-card {
+  display: grid;
+  gap: 18px;
+  width: min(420px, 100%);
+  padding: 28px;
+  border: 1px solid #d6d0c4;
+  border-radius: 8px;
+  background: #fffdfa;
+  box-shadow: 0 18px 42px rgb(34 36 42 / 10%);
+}
+
+.auth-card h1 {
+  margin-top: 4px;
+  font-size: 28px;
+  line-height: 1.15;
+}
+
 .top-progress {
   position: fixed;
   z-index: 3000;
@@ -198,6 +223,12 @@ p {
   margin-top: 4px;
   font-size: 28px;
   line-height: 1.15;
+}
+
+.topbar-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 
 .mobile-menu-button {

@@ -14,6 +14,7 @@ import (
 	"github.com/fdcs99/biligo/internal/biliticket"
 	"github.com/fdcs99/biligo/internal/events"
 	"github.com/fdcs99/biligo/internal/model"
+	"github.com/fdcs99/biligo/internal/panelauth"
 	"github.com/fdcs99/biligo/internal/runner"
 	"github.com/fdcs99/biligo/internal/store"
 	"github.com/gin-gonic/gin"
@@ -25,11 +26,15 @@ type Handler struct {
 	ticket *biliticket.Client
 	hub    *events.Hub
 	runner *runner.Manager
+	panel  *panelauth.Manager
 }
 
-func NewRouter(store *store.Store) *gin.Engine {
+func NewRouter(store *store.Store, panel *panelauth.Manager) *gin.Engine {
 	router := gin.Default()
 	router.Use(devCORS())
+	if panel == nil {
+		panel = panelauth.NewManager("", 24*time.Hour)
+	}
 
 	hub := events.NewHub()
 	ticket := biliticket.NewClient(nil)
@@ -39,36 +44,45 @@ func NewRouter(store *store.Store) *gin.Engine {
 		ticket: ticket,
 		hub:    hub,
 		runner: runner.NewManager(store, ticket, hub),
+		panel:  panel,
 	}
 	api := router.Group("/api")
 	{
 		api.GET("/health", handler.health)
-		api.GET("/events", handler.events)
-		api.GET("/auth/session", handler.sessionSummary)
-		api.POST("/auth/qr/start", handler.startQRLogin)
-		api.POST("/auth/qr/poll", handler.pollQRLogin)
-		api.POST("/auth/cookie-login", handler.cookieLogin)
+		api.POST("/panel-auth/login", handler.panelLogin)
 
-		api.GET("/accounts", handler.listAccounts)
-		api.POST("/accounts", handler.createAccount)
-		api.PUT("/accounts/:id", handler.updateAccount)
-		api.GET("/accounts/:id/cookie", handler.accountCookie)
-		api.POST("/accounts/:id/verify", handler.verifyAccount)
-		api.DELETE("/accounts/:id", handler.deleteAccount)
+		protected := api.Group("")
+		protected.Use(handler.requirePanelAuth())
+		{
+			protected.GET("/panel-auth/session", handler.panelSession)
 
-		api.GET("/ticket-projects/history", handler.listTicketProjectHistory)
-		api.POST("/ticket-projects/fetch", handler.fetchTicketProject)
-		api.POST("/ticket-projects/account-context", handler.fetchTicketAccountContext)
+			protected.GET("/events", handler.events)
+			protected.GET("/auth/session", handler.sessionSummary)
+			protected.POST("/auth/qr/start", handler.startQRLogin)
+			protected.POST("/auth/qr/poll", handler.pollQRLogin)
+			protected.POST("/auth/cookie-login", handler.cookieLogin)
 
-		api.GET("/tasks", handler.listTasks)
-		api.POST("/tasks", handler.createTask)
-		api.PUT("/tasks/:id", handler.updateTask)
-		api.DELETE("/tasks/:id", handler.deleteTask)
-		api.POST("/tasks/:id/dispatch", handler.dispatchTask)
-		api.POST("/tasks/:id/pause", handler.pauseTask)
-		api.GET("/tasks/:id/logs", handler.listTaskLogs)
+			protected.GET("/accounts", handler.listAccounts)
+			protected.POST("/accounts", handler.createAccount)
+			protected.PUT("/accounts/:id", handler.updateAccount)
+			protected.GET("/accounts/:id/cookie", handler.accountCookie)
+			protected.POST("/accounts/:id/verify", handler.verifyAccount)
+			protected.DELETE("/accounts/:id", handler.deleteAccount)
 
-		api.GET("/logs", handler.listLogs)
+			protected.GET("/ticket-projects/history", handler.listTicketProjectHistory)
+			protected.POST("/ticket-projects/fetch", handler.fetchTicketProject)
+			protected.POST("/ticket-projects/account-context", handler.fetchTicketAccountContext)
+
+			protected.GET("/tasks", handler.listTasks)
+			protected.POST("/tasks", handler.createTask)
+			protected.PUT("/tasks/:id", handler.updateTask)
+			protected.DELETE("/tasks/:id", handler.deleteTask)
+			protected.POST("/tasks/:id/dispatch", handler.dispatchTask)
+			protected.POST("/tasks/:id/pause", handler.pauseTask)
+			protected.GET("/tasks/:id/logs", handler.listTaskLogs)
+
+			protected.GET("/logs", handler.listLogs)
+		}
 	}
 
 	return router
@@ -78,7 +92,7 @@ func devCORS() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type")
+		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
@@ -100,6 +114,58 @@ func (h *Handler) health(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, status)
+}
+
+func (h *Handler) panelLogin(c *gin.Context) {
+	var input model.PanelLoginInput
+	if !bindJSON(c, &input) {
+		return
+	}
+	token, expiresAt, ok, err := h.panel.Login(input.Password)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "面板密码错误"})
+		return
+	}
+	c.JSON(http.StatusOK, model.PanelAuthResponse{
+		Token:     token,
+		ExpiresAt: expiresAt.Format(time.RFC3339),
+	})
+}
+
+func (h *Handler) panelSession(c *gin.Context) {
+	expiresAt, _ := c.Get("panelAuthExpiresAt")
+	if value, ok := expiresAt.(time.Time); ok {
+		c.JSON(http.StatusOK, model.PanelAuthResponse{
+			ExpiresAt: value.Format(time.RFC3339),
+		})
+		return
+	}
+	c.JSON(http.StatusUnauthorized, gin.H{"error": "面板登录已失效"})
+}
+
+func (h *Handler) requirePanelAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := panelTokenFromRequest(c)
+		expiresAt, ok := h.panel.Validate(token)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "面板登录已失效，请重新登录"})
+			return
+		}
+		c.Set("panelAuthExpiresAt", expiresAt)
+		c.Next()
+	}
+}
+
+func panelTokenFromRequest(c *gin.Context) string {
+	authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
+	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+		return strings.TrimSpace(authHeader[len("bearer "):])
+	}
+	return strings.TrimSpace(c.Query("token"))
 }
 
 func (h *Handler) events(c *gin.Context) {

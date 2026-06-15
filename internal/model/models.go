@@ -91,6 +91,15 @@ type AccountVerifyResponse struct {
 	Account   *Account `json:"account,omitempty"`
 }
 
+type PanelLoginInput struct {
+	Password string `json:"password"`
+}
+
+type PanelAuthResponse struct {
+	Token     string `json:"token,omitempty"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
 type TicketProjectHistory struct {
 	ProjectID    int64  `json:"projectId"`
 	ProjectName  string `json:"projectName"`

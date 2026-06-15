@@ -6,6 +6,8 @@
 
 - 基础地址：`http://localhost:8080/api`
 - 请求体：`Content-Type: application/json`
+- 除 `GET /api/health` 与 `POST /api/panel-auth/login` 外，所有接口都需要面板鉴权。
+- 面板鉴权请求头：`Authorization: Bearer <token>`。
 - 时间字段：字符串，当前后端使用 RFC3339 或前端提交的原始时间字符串。
 - 空列表：返回 `[]`。
 - 删除成功：返回 `204 No Content`。
@@ -26,6 +28,7 @@
 | `201` | 创建成功 |
 | `204` | 删除成功，无响应体 |
 | `400` | 请求参数错误 |
+| `401` | 面板未登录、密码错误或 token 已失效 |
 | `404` | 资源不存在 |
 | `500` | 服务端错误 |
 | `503` | 健康检查失败 |
@@ -43,6 +46,41 @@
   "status": "ok",
   "database": "ok",
   "time": "2026-06-12T21:47:14+08:00"
+}
+```
+
+## 面板鉴权
+
+### POST `/api/panel-auth/login`
+
+使用本地面板密码登录。面板密码来自 `auth.password` 配置；若未配置，服务启动会生成随机密码、写入配置文件并输出到控制台。Token 有效期为 24 小时，服务重启后已签发 Token 失效。
+
+请求：
+
+```json
+{
+  "password": "panel-password"
+}
+```
+
+响应：
+
+```json
+{
+  "token": "random-bearer-token",
+  "expiresAt": "2026-06-15T20:00:00+08:00"
+}
+```
+
+### GET `/api/panel-auth/session`
+
+校验当前 Bearer Token 是否仍有效。该接口需要 `Authorization: Bearer <token>`。
+
+响应：
+
+```json
+{
+  "expiresAt": "2026-06-15T20:00:00+08:00"
 }
 ```
 
@@ -683,7 +721,11 @@ GET /api/logs?task_id=1
 
 ### GET `/api/events`
 
-SSE 事件流。连接成功后先推送一次快照，之后推送任务、日志和心跳事件。
+SSE 事件流。连接成功后先推送一次快照，之后推送任务、日志和心跳事件。浏览器原生 `EventSource` 无法设置 `Authorization` 请求头，因此该接口支持通过查询参数传递面板 token：
+
+```text
+GET /api/events?token=<token>
+```
 
 事件类型：
 

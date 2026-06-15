@@ -76,6 +76,15 @@ export interface AccountVerifyResponse {
   account?: Account
 }
 
+export interface PanelLoginInput {
+  password: string
+}
+
+export interface PanelAuthResponse {
+  token?: string
+  expiresAt: string
+}
+
 export interface TicketProjectHistory {
   projectId: number
   projectName: string
@@ -243,13 +252,53 @@ export interface EventSnapshot {
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+const PANEL_AUTH_TOKEN_KEY = 'biligo.panelAuth.token'
+const PANEL_AUTH_EXPIRES_KEY = 'biligo.panelAuth.expiresAt'
+
+type APIRequestInit = RequestInit & {
+  skipUnauthorizedHandler?: boolean
+}
+
+let panelAuthToken = localStorage.getItem(PANEL_AUTH_TOKEN_KEY) ?? ''
+let unauthorizedHandler: (() => void) | undefined
+
+export function getPanelAuthToken() {
+  return panelAuthToken
+}
+
+export function setPanelAuthToken(token: string, expiresAt: string) {
+  panelAuthToken = token
+  localStorage.setItem(PANEL_AUTH_TOKEN_KEY, token)
+  localStorage.setItem(PANEL_AUTH_EXPIRES_KEY, expiresAt)
+}
+
+export function clearPanelAuthToken() {
+  panelAuthToken = ''
+  localStorage.removeItem(PANEL_AUTH_TOKEN_KEY)
+  localStorage.removeItem(PANEL_AUTH_EXPIRES_KEY)
+}
+
+export function getPanelAuthExpiresAt() {
+  return localStorage.getItem(PANEL_AUTH_EXPIRES_KEY) ?? ''
+}
+
+export function setUnauthorizedHandler(handler: () => void) {
+  unauthorizedHandler = handler
+}
+
+async function request<T>(path: string, options: APIRequestInit = {}): Promise<T> {
+  const { skipUnauthorizedHandler, headers, ...fetchOptions } = options
+  const requestHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(headers as Record<string, string> | undefined),
+  }
+  if (panelAuthToken) {
+    requestHeaders.Authorization = `Bearer ${panelAuthToken}`
+  }
+
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-    ...options,
+    headers: requestHeaders,
+    ...fetchOptions,
   })
 
   if (!response.ok) {
@@ -261,6 +310,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       }
     } catch {
       // Keep the HTTP status message.
+    }
+    if (response.status === 401 && !skipUnauthorizedHandler) {
+      unauthorizedHandler?.()
     }
     throw new Error(message)
   }
@@ -274,6 +326,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 export const api = {
   health: () => request<Health>('/api/health'),
+  panelLogin: (payload: PanelLoginInput) =>
+    request<PanelAuthResponse>('/api/panel-auth/login', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      skipUnauthorizedHandler: true,
+    }),
+  panelSession: () => request<PanelAuthResponse>('/api/panel-auth/session', { skipUnauthorizedHandler: true }),
   session: () => request<SessionSummary>('/api/auth/session'),
   startQRLogin: () =>
     request<QRLoginStartResponse>('/api/auth/qr/start', { method: 'POST' }),

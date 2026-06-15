@@ -1,15 +1,20 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/fdcs99/biligo/internal/model"
+	"github.com/fdcs99/biligo/internal/panelauth"
 	"github.com/fdcs99/biligo/internal/store"
+	"github.com/gin-gonic/gin"
 )
 
 func TestDeleteTaskWritesLog(t *testing.T) {
@@ -37,8 +42,10 @@ func TestDeleteTaskWritesLog(t *testing.T) {
 		t.Fatalf("CreateTask: %v", err)
 	}
 
-	router := NewRouter(taskStore)
+	router := newTestRouter(taskStore)
+	token := loginTestPanel(t, router, "panel-secret")
 	req := httptest.NewRequest(http.MethodDelete, "/api/tasks/1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 	if resp.Code != http.StatusNoContent {
@@ -58,4 +65,116 @@ func TestDeleteTaskWritesLog(t *testing.T) {
 	if logs[0].TaskID != task.ID || logs[0].Level != "warn" || logs[0].Message != "任务已删除：待删除任务。" {
 		t.Fatalf("unexpected delete log: %#v", logs[0])
 	}
+}
+
+func TestPanelAuthProtectsAPIs(t *testing.T) {
+	taskStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer taskStore.Close()
+
+	router := newTestRouter(taskStore)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("health status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("tasks without token status = %d, want 401", resp.Code)
+	}
+
+	badBody := bytes.NewBufferString(`{"password":"wrong"}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/panel-auth/login", badBody)
+	req.Header.Set("Content-Type", "application/json")
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("bad login status = %d, want 401", resp.Code)
+	}
+
+	token := loginTestPanel(t, router, "panel-secret")
+	req = httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("tasks with token status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/panel-auth/session", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("session status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestPanelAuthProtectsEventsAndAllowsQueryToken(t *testing.T) {
+	taskStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer taskStore.Close()
+
+	router := newTestRouter(taskStore)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("events without token status = %d, want 401", resp.Code)
+	}
+
+	token := loginTestPanel(t, router, "panel-secret")
+	ctx, cancel := context.WithCancel(context.Background())
+	req = httptest.NewRequest(http.MethodGet, "/api/events?token="+token, nil).WithContext(ctx)
+	resp = httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		router.ServeHTTP(resp, req)
+		close(done)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("events request did not stop after context cancel")
+	}
+	if resp.Code != http.StatusOK {
+		t.Fatalf("events with query token status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+}
+
+func newTestRouter(taskStore *store.Store) *gin.Engine {
+	return NewRouter(taskStore, panelauth.NewManager("panel-secret", 24*time.Hour))
+}
+
+func loginTestPanel(t *testing.T, router *gin.Engine, password string) string {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/panel-auth/login", bytes.NewBufferString(`{"password":"`+password+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("login status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+
+	var auth model.PanelAuthResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &auth); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if auth.Token == "" || auth.ExpiresAt == "" {
+		t.Fatalf("unexpected login response: %#v", auth)
+	}
+	return auth.Token
 }

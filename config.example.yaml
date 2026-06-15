@@ -3,3 +3,7 @@ server:
 
 database:
   path: "data/biligo.db"
+
+auth:
+  # Panel password. Leave empty to generate and write one on server startup.
+  password: ""

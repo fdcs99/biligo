@@ -35,7 +35,15 @@ import type {
   TicketProject,
   TicketProjectHistory,
 } from './api'
-import { API_BASE, api } from './api'
+import {
+  API_BASE,
+  api,
+  clearPanelAuthToken,
+  getPanelAuthExpiresAt,
+  getPanelAuthToken,
+  setPanelAuthToken,
+  setUnauthorizedHandler,
+} from './api'
 
 type SectionKey = 'accounts' | 'taskConfig' | 'taskStatus'
 type QRLoginStatus = 'idle' | 'generated' | 'waiting_scan' | 'waiting_confirm' | 'confirmed' | 'expired' | 'failed'
@@ -54,6 +62,12 @@ const notice = ref('')
 const health = ref<Health | null>(null)
 const session = ref<SessionSummary | null>(null)
 const mobileNavOpen = ref(false)
+const panelAuth = reactive({
+  checking: true,
+  authenticated: false,
+  password: '',
+  expiresAt: getPanelAuthExpiresAt(),
+})
 
 const accounts = ref<Account[]>([])
 const ticketProjectHistories = ref<TicketProjectHistory[]>([])
@@ -126,6 +140,7 @@ const nowMs = ref(Date.now())
 const sseStatus = ref('未连接')
 let eventSource: EventSource | null = null
 let clockTimer: number | undefined
+let panelAuthExpiryTimer: number | undefined
 
 const selectedTask = computed(() => tasks.value.find((task) => task.id === selectedTaskId.value))
 const selectedTaskTicketSubtitle = computed(() =>
@@ -184,6 +199,98 @@ async function loadAll() {
     tasks.value = taskData ?? []
     logs.value = logData ?? []
   })
+}
+
+async function initializePanelAuth() {
+  setUnauthorizedHandler(handlePanelUnauthorized)
+  panelAuth.checking = true
+  try {
+    if (!getPanelAuthToken()) {
+      panelAuth.authenticated = false
+      return
+    }
+    const session = await api.panelSession()
+    panelAuth.expiresAt = session.expiresAt
+    panelAuth.authenticated = true
+    schedulePanelAuthExpiry(session.expiresAt)
+    await bootConsole()
+  } catch {
+    clearPanelSession()
+  } finally {
+    panelAuth.checking = false
+  }
+}
+
+async function loginPanel() {
+  await run(async () => {
+    const password = panelAuth.password.trim()
+    if (!password) {
+      throw new Error('请输入面板密码')
+    }
+    const result = await api.panelLogin({ password })
+    if (!result.token) {
+      throw new Error('登录响应缺少 token')
+    }
+    setPanelAuthToken(result.token, result.expiresAt)
+    panelAuth.password = ''
+    panelAuth.expiresAt = result.expiresAt
+    panelAuth.authenticated = true
+    schedulePanelAuthExpiry(result.expiresAt)
+    await bootConsole()
+  }, '面板登录成功')
+}
+
+async function bootConsole() {
+  await loadAll()
+  resetTaskForm()
+  connectEvents()
+  startClock()
+}
+
+function logoutPanel() {
+  clearPanelSession()
+  notice.value = '已退出面板登录'
+}
+
+function handlePanelUnauthorized() {
+  clearPanelSession()
+  error.value = '面板登录已失效，请重新登录。'
+}
+
+function clearPanelSession() {
+  clearPanelAuthToken()
+  panelAuth.authenticated = false
+  panelAuth.expiresAt = ''
+  closeEvents()
+  stopClock()
+  clearPanelAuthExpiry()
+  accounts.value = []
+  ticketProjectHistories.value = []
+  tasks.value = []
+  logs.value = []
+  session.value = null
+}
+
+function schedulePanelAuthExpiry(expiresAt: string) {
+  clearPanelAuthExpiry()
+  const expiresAtMs = Date.parse(expiresAt)
+  if (Number.isNaN(expiresAtMs)) {
+    return
+  }
+  const delay = expiresAtMs - Date.now()
+  if (delay <= 0) {
+    handlePanelUnauthorized()
+    return
+  }
+  panelAuthExpiryTimer = window.setTimeout(handlePanelUnauthorized, delay)
+}
+
+function clearPanelAuthExpiry() {
+  if (panelAuthExpiryTimer === undefined) {
+    return
+  }
+  window.clearTimeout(panelAuthExpiryTimer)
+  panelAuthExpiryTimer = undefined
 }
 
 function resetAccountForm() {
@@ -888,7 +995,12 @@ function addLog(log: TaskLog) {
 
 function connectEvents() {
   eventSource?.close()
-  const source = new EventSource(`${API_BASE}/api/events`)
+  const token = getPanelAuthToken()
+  if (!token) {
+    sseStatus.value = '未登录'
+    return
+  }
+  const source = new EventSource(`${API_BASE}/api/events?token=${encodeURIComponent(token)}`)
   eventSource = source
   sseStatus.value = '连接中'
 
@@ -916,6 +1028,29 @@ function connectEvents() {
   source.addEventListener('log.created', (event) => {
     addLog(JSON.parse((event as MessageEvent).data) as TaskLog)
   })
+}
+
+function closeEvents() {
+  eventSource?.close()
+  eventSource = null
+  sseStatus.value = '未连接'
+}
+
+function startClock() {
+  if (clockTimer !== undefined) {
+    return
+  }
+  clockTimer = window.setInterval(() => {
+    nowMs.value = Date.now()
+  }, 1000)
+}
+
+function stopClock() {
+  if (clockTimer === undefined) {
+    return
+  }
+  window.clearInterval(clockTimer)
+  clockTimer = undefined
 }
 
 function countdownText(task: Task) {
@@ -1092,25 +1227,48 @@ function qrStatusTagType() {
 }
 
 onMounted(async () => {
-  await loadAll()
-  resetTaskForm()
-  connectEvents()
-  clockTimer = window.setInterval(() => {
-    nowMs.value = Date.now()
-  }, 1000)
+  await initializePanelAuth()
 })
 
 onUnmounted(() => {
   stopQRAutoPoll()
-  eventSource?.close()
-  if (clockTimer !== undefined) {
-    window.clearInterval(clockTimer)
-  }
+  closeEvents()
+  stopClock()
 })
 </script>
 
 <template>
-  <el-container class="app-shell">
+  <section v-if="panelAuth.checking" class="auth-shell">
+    <div class="auth-card">
+      <p class="eyebrow">Biligo</p>
+      <h1>票务控制台</h1>
+      <p class="muted">正在校验面板登录状态...</p>
+    </div>
+  </section>
+
+  <section v-else-if="!panelAuth.authenticated" class="auth-shell">
+    <el-form class="auth-card" label-position="top" @submit.prevent="loginPanel">
+      <div>
+        <p class="eyebrow">Biligo</p>
+        <h1>票务控制台</h1>
+        <p class="muted">请输入本地面板密码后继续。</p>
+      </div>
+      <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" />
+      <el-form-item required label="面板密码">
+        <el-input
+          v-model="panelAuth.password"
+          type="password"
+          show-password
+          autocomplete="current-password"
+          placeholder="查看控制台或 config.yaml"
+          @keyup.enter="loginPanel"
+        />
+      </el-form-item>
+      <el-button native-type="submit" type="primary" :loading="loading">登录</el-button>
+    </el-form>
+  </section>
+
+  <el-container v-else class="app-shell">
     <div v-if="loading" class="top-progress" aria-label="页面加载中"></div>
 
     <el-aside width="260px" class="sidebar desktop-sidebar">
@@ -1162,7 +1320,10 @@ onUnmounted(() => {
           <p class="eyebrow">本地单用户模式</p>
           <h2>{{ sections.find((section) => section.key === activeSection)?.label }}</h2>
         </div>
-        <el-button :icon="Refresh" :loading="loading" @click="loadAll">刷新</el-button>
+        <div class="topbar-actions">
+          <el-button :icon="Refresh" :loading="loading" @click="loadAll">刷新</el-button>
+          <el-button :icon="SwitchButton" plain @click="logoutPanel">退出</el-button>
+        </div>
       </header>
 
       <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" />

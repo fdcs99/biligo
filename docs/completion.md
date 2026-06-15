@@ -8,6 +8,32 @@
 - 每条记录包含：日期、类型、摘要、主要变更、验收情况、遗留事项。
 - 只记录已经完成或明确决策的内容，不记录未确认的想法。
 
+## 2026-06-15 面板鉴权
+
+类型：安全增强
+
+摘要：Web 控制台新增本地面板登录，登录成功后使用 Bearer Token 访问账号、票务、任务、日志和 SSE 接口。
+
+主要变更：
+
+- 新增 `auth.password` 配置项和 `BILIGO_PANEL_PASSWORD` 环境变量覆盖。
+- 未配置面板密码时，服务启动会生成随机密码、写入配置文件并输出到控制台。
+- 新增 `POST /api/panel-auth/login` 与 `GET /api/panel-auth/session`。
+- 除健康检查和面板登录外，所有 API 均要求有效 Bearer Token。
+- SSE 支持通过 `/api/events?token=<token>` 传递面板 token。
+- 前端新增登录页、token 本地保存、到期/401 自动退出和手动退出登录。
+
+验收情况：
+
+- 已通过 `go test ./...`。
+- 已通过 `CGO_ENABLED=0 go test ./...`。
+- 已通过 `npm run build`。
+- 已通过 `git diff --check`。
+
+遗留事项：
+
+- Token 存储于服务内存，服务重启后需要重新登录。
+
 ## 2026-06-15 切换纯 Go SQLite 驱动
 
 类型：技术调整
