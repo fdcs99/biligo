@@ -64,3 +64,21 @@ func TestLoggerAutoDoesNotColorNonTerminalWriter(t *testing.T) {
 		t.Fatalf("plain error log missing: %q", got)
 	}
 }
+
+func TestLoggerWritesPlainFileOutput(t *testing.T) {
+	var console bytes.Buffer
+	var file bytes.Buffer
+	logger := newWithWriters([]string{LevelError}, &console, &file, ColorAlways)
+
+	logger.Errorf("stored")
+
+	if !strings.Contains(console.String(), "[\x1b[31mERROR\x1b[0m] stored") {
+		t.Fatalf("colored console log missing: %q", console.String())
+	}
+	if strings.Contains(file.String(), "\x1b[") {
+		t.Fatalf("file log should not contain ANSI colors: %q", file.String())
+	}
+	if !strings.Contains(file.String(), "[ERROR] stored") {
+		t.Fatalf("plain file log missing: %q", file.String())
+	}
+}

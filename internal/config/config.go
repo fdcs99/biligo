@@ -34,8 +34,14 @@ type AuthConfig struct {
 }
 
 type LoggingConfig struct {
-	Levels LogLevels `yaml:"levels"`
-	Color  string    `yaml:"color"`
+	Levels LogLevels         `yaml:"levels"`
+	Color  string            `yaml:"color"`
+	File   LoggingFileConfig `yaml:"file"`
+}
+
+type LoggingFileConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Path    string `yaml:"path"`
 }
 
 type LogLevels []string
@@ -51,6 +57,9 @@ func Load(path string) (Config, error) {
 		Logging: LoggingConfig{
 			Levels: LogLevels{"info", "warn", "error"},
 			Color:  "auto",
+			File: LoggingFileConfig{
+				Path: "logs/biligo.log",
+			},
 		},
 	}
 
@@ -85,6 +94,9 @@ func Load(path string) (Config, error) {
 		cfg.Database.Path = "data/biligo.db"
 	}
 	cfg.Logging.Color = normalizeLogColor(cfg.Logging.Color)
+	if strings.TrimSpace(cfg.Logging.File.Path) == "" {
+		cfg.Logging.File.Path = "logs/biligo.log"
+	}
 	if strings.TrimSpace(cfg.Auth.Password) == "" {
 		password, err := generatePanelPassword()
 		if err != nil {

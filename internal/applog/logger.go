@@ -21,10 +21,11 @@ const (
 )
 
 type Logger struct {
-	mu      sync.Mutex
-	out     io.Writer
-	enabled map[string]bool
-	color   bool
+	mu       sync.Mutex
+	console  io.Writer
+	file     io.Writer
+	enabled  map[string]bool
+	useColor bool
 }
 
 func New(levels []string, colorMode ...string) *Logger {
@@ -32,7 +33,7 @@ func New(levels []string, colorMode ...string) *Logger {
 	if len(colorMode) > 0 {
 		mode = colorMode[0]
 	}
-	return newWithWriter(levels, os.Stdout, mode)
+	return newWithWriters(levels, os.Stdout, nil, mode)
 }
 
 func NewWithWriter(levels []string, out io.Writer, colorMode ...string) *Logger {
@@ -40,18 +41,22 @@ func NewWithWriter(levels []string, out io.Writer, colorMode ...string) *Logger 
 	if len(colorMode) > 0 {
 		mode = colorMode[0]
 	}
-	return newWithWriter(levels, out, mode)
+	return newWithWriters(levels, out, nil, mode)
 }
 
-func newWithWriter(levels []string, out io.Writer, colorMode string) *Logger {
-	if out == nil {
-		out = io.Discard
+func NewWithFile(levels []string, colorMode string, file io.Writer) *Logger {
+	return newWithWriters(levels, os.Stdout, file, colorMode)
+}
+
+func newWithWriters(levels []string, console io.Writer, file io.Writer, colorMode string) *Logger {
+	if console == nil {
+		console = io.Discard
 	}
 	enabled := map[string]bool{}
 	for _, level := range levels {
 		level = normalizeLevel(level)
 		if level == "none" {
-			return &Logger{out: out, enabled: map[string]bool{}}
+			return &Logger{console: console, file: file, enabled: map[string]bool{}}
 		}
 		if level == "all" {
 			enabled[LevelError] = true
@@ -63,7 +68,7 @@ func newWithWriter(levels []string, out io.Writer, colorMode string) *Logger {
 			enabled[level] = true
 		}
 	}
-	return &Logger{out: out, enabled: enabled, color: shouldUseColor(out, colorMode)}
+	return &Logger{console: console, file: file, enabled: enabled, useColor: shouldUseColor(console, colorMode)}
 }
 
 func (l *Logger) Errorf(format string, args ...any) {
@@ -94,10 +99,16 @@ func (l *Logger) Log(level string, message string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	label := strings.ToUpper(level)
-	if l.color {
-		label = colorizeLevel(level, label)
+	timestamp := time.Now().Format(time.RFC3339)
+	body := strings.TrimSpace(message)
+	consoleLabel := label
+	if l.useColor {
+		consoleLabel = colorizeLevel(level, label)
 	}
-	fmt.Fprintf(l.out, "%s [%s] %s\n", time.Now().Format(time.RFC3339), label, strings.TrimSpace(message))
+	fmt.Fprintf(l.console, "%s [%s] %s\n", timestamp, consoleLabel, body)
+	if l.file != nil {
+		fmt.Fprintf(l.file, "%s [%s] %s\n", timestamp, label, body)
+	}
 }
 
 func normalizeLevel(level string) string {

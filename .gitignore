@@ -1,6 +1,7 @@
 # Local data
 data/
 config.yaml
+logs/
 
 # Go
 *.test

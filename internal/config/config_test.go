@@ -34,6 +34,12 @@ func TestLoadGeneratesAndWritesPanelPassword(t *testing.T) {
 	if cfg.Logging.Color != "auto" {
 		t.Fatalf("Logging.Color = %q, want auto", cfg.Logging.Color)
 	}
+	if cfg.Logging.File.Enabled {
+		t.Fatal("Logging.File.Enabled should default to false")
+	}
+	if cfg.Logging.File.Path != "logs/biligo.log" {
+		t.Fatalf("Logging.File.Path = %q, want logs/biligo.log", cfg.Logging.File.Path)
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -85,6 +91,9 @@ auth:
 logging:
   levels: none
   color: never
+  file:
+    enabled: true
+    path: "logs/test.log"
 `), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -98,6 +107,9 @@ logging:
 	}
 	if cfg.Logging.Color != "never" {
 		t.Fatalf("Logging.Color = %q, want never", cfg.Logging.Color)
+	}
+	if !cfg.Logging.File.Enabled || cfg.Logging.File.Path != "logs/test.log" {
+		t.Fatalf("Logging.File = %#v, want enabled logs/test.log", cfg.Logging.File)
 	}
 
 	t.Setenv("BILIGO_LOG_LEVELS", "warn,error")

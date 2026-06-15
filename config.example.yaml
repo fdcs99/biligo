@@ -16,3 +16,7 @@ logging:
     - error
   # Console color mode: auto, always, never.
   color: auto
+  file:
+    # Write application logs to a file.
+    enabled: false
+    path: "logs/biligo.log"
