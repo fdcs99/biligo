@@ -1287,7 +1287,7 @@ onUnmounted(() => {
                 </span>
                 <button type="button" @click="editTask(task)">编辑</button>
                 <button type="button" class="primary-button compact" @click="dispatchTask(task.id)">下发</button>
-                <button v-if="task.status === 'draft'" type="button" class="danger-button" @click="deleteTask(task.id)">删除</button>
+                <button type="button" class="danger-button" @click="deleteTask(task.id)">删除</button>
               </div>
             </article>
             <p v-if="pendingTasks.length === 0" class="empty">暂无待下发任务</p>
@@ -1318,6 +1318,7 @@ onUnmounted(() => {
                   编辑
                 </button>
                 <button type="button" @click="stopTask(task.id)">停止</button>
+                <button type="button" class="danger-button" @click="deleteTask(task.id)">删除</button>
               </div>
             </article>
             <p v-if="dispatchedTasks.length === 0" class="empty">暂无已下发任务</p>
