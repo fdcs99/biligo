@@ -157,6 +157,85 @@ func TestPanelAuthProtectsEventsAndAllowsQueryToken(t *testing.T) {
 	}
 }
 
+func TestNotificationAPIs(t *testing.T) {
+	taskStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer taskStore.Close()
+
+	sender := &fakeNotificationSender{}
+	router := NewRouter(
+		taskStore,
+		panelauth.NewManager("panel-secret", 24*time.Hour),
+		applog.NewWithWriter([]string{"none"}, nil),
+		WithNotificationSender(sender),
+	)
+	req := httptest.NewRequest(http.MethodGet, "/api/notifications", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("notifications without token status = %d, want 401", resp.Code)
+	}
+
+	token := loginTestPanel(t, router, "panel-secret")
+	body := bytes.NewBufferString(`{"name":"PushPlus","provider":"pushplus","config":{"token":"push-token"}}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/notifications", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("create notification status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	var notification model.Notification
+	if err := json.Unmarshal(resp.Body.Bytes(), &notification); err != nil {
+		t.Fatalf("decode notification: %v", err)
+	}
+	if notification.ID == 0 || notification.Provider != model.NotificationProviderPushPlus || notification.Config["token"] != "push-token" {
+		t.Fatalf("unexpected notification: %#v", notification)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/notifications/1/test", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("test notification status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	if sender.calls != 1 || sender.lastTitle != "Biligo 通知测试" {
+		t.Fatalf("unexpected sender state: %#v", sender)
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &notification); err != nil {
+		t.Fatalf("decode tested notification: %v", err)
+	}
+	if notification.LastTestStatus != "success" || notification.LastTestedAt == "" {
+		t.Fatalf("unexpected test status: %#v", notification)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/notifications/1/enable", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("enable notification status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &notification); err != nil {
+		t.Fatalf("decode enabled notification: %v", err)
+	}
+	if !notification.Enabled {
+		t.Fatalf("Enabled = false, want true")
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/notifications/1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("delete notification status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+}
+
 func TestPanelAuthLogsLoginLogoutAndTaskLogs(t *testing.T) {
 	taskStore, err := store.Open(":memory:")
 	if err != nil {
@@ -213,6 +292,17 @@ func TestPanelAuthLogsLoginLogoutAndTaskLogs(t *testing.T) {
 	if !strings.Contains(out.String(), "[INFO] 面板退出登录成功") {
 		t.Fatalf("logout log missing: %q", out.String())
 	}
+}
+
+type fakeNotificationSender struct {
+	calls     int
+	lastTitle string
+}
+
+func (f *fakeNotificationSender) Send(ctx context.Context, notification model.Notification, title string, content string) error {
+	f.calls++
+	f.lastTitle = title
+	return nil
 }
 
 func TestWebUIRoutesDoNotInterceptAPI(t *testing.T) {

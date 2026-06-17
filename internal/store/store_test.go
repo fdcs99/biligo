@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -151,6 +152,9 @@ func TestMigrateCreatesCurrentTaskSchemaOnly(t *testing.T) {
 	if tableExists(t, store, "ticket_groups") {
 		t.Fatal("ticket_groups table should not be created")
 	}
+	if !tableExists(t, store, "notifications") {
+		t.Fatal("notifications table should be created")
+	}
 	if columnExists(t, store, "tasks", "ticket_group_id") {
 		t.Fatal("tasks.ticket_group_id should not be created")
 	}
@@ -182,6 +186,75 @@ func TestMigrateCreatesCurrentTaskSchemaOnly(t *testing.T) {
 		if !columnExists(t, store, "tasks", column) {
 			t.Fatalf("tasks.%s should exist", column)
 		}
+	}
+}
+
+func TestNotificationStoreCRUD(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	notification, err := store.CreateNotification(context.Background(), model.NotificationInput{
+		Name:     "PushPlus",
+		Provider: model.NotificationProviderPushPlus,
+		Config:   map[string]string{"token": "push-token"},
+	})
+	if err != nil {
+		t.Fatalf("CreateNotification: %v", err)
+	}
+	if notification.ID == 0 || notification.Enabled {
+		t.Fatalf("unexpected created notification: %#v", notification)
+	}
+	if notification.Config["token"] != "push-token" {
+		t.Fatalf("Config = %#v", notification.Config)
+	}
+
+	notification, err = store.UpdateNotification(context.Background(), notification.ID, model.NotificationInput{
+		Name:     "Bark",
+		Provider: model.NotificationProviderBark,
+		Config:   map[string]string{"token": "https://bark.example.app/key"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateNotification: %v", err)
+	}
+	if notification.Provider != model.NotificationProviderBark || notification.Config["token"] != "https://bark.example.app/key" {
+		t.Fatalf("unexpected updated notification: %#v", notification)
+	}
+
+	notification, err = store.SetNotificationEnabled(context.Background(), notification.ID, true)
+	if err != nil {
+		t.Fatalf("SetNotificationEnabled: %v", err)
+	}
+	if !notification.Enabled {
+		t.Fatalf("Enabled = false, want true")
+	}
+	enabled, err := store.ListEnabledNotifications(context.Background())
+	if err != nil {
+		t.Fatalf("ListEnabledNotifications: %v", err)
+	}
+	if len(enabled) != 1 || enabled[0].ID != notification.ID {
+		t.Fatalf("enabled notifications = %#v", enabled)
+	}
+
+	notification, err = store.SetNotificationTestResult(context.Background(), notification.ID, "success", "测试推送已发送。")
+	if err != nil {
+		t.Fatalf("SetNotificationTestResult: %v", err)
+	}
+	if notification.LastTestStatus != "success" || notification.LastTestMessage == "" || notification.LastTestedAt == "" {
+		t.Fatalf("unexpected test result: %#v", notification)
+	}
+
+	if err := store.DeleteNotification(context.Background(), notification.ID); err != nil {
+		t.Fatalf("DeleteNotification: %v", err)
+	}
+	notifications, err := store.ListNotifications(context.Background())
+	if err != nil {
+		t.Fatalf("ListNotifications: %v", err)
+	}
+	if len(notifications) != 0 {
+		t.Fatalf("notifications = %#v, want empty", notifications)
 	}
 }
 
@@ -325,10 +398,7 @@ func tableExists(t *testing.T, store *Store, name string) bool {
 func columnExists(t *testing.T, store *Store, table string, column string) bool {
 	t.Helper()
 
-	if table != "tasks" {
-		t.Fatalf("unsupported table %s", table)
-	}
-	rows, err := store.db.QueryContext(context.Background(), `PRAGMA table_info(tasks)`)
+	rows, err := store.db.QueryContext(context.Background(), fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
 		t.Fatalf("query columns for %s: %v", table, err)
 	}

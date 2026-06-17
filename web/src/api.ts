@@ -85,6 +85,25 @@ export interface PanelAuthResponse {
   expiresAt: string
 }
 
+export interface Notification {
+  id: number
+  name: string
+  provider: string
+  config: Record<string, string>
+  enabled: boolean
+  lastTestStatus: string
+  lastTestMessage: string
+  lastTestedAt: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface NotificationInput {
+  name: string
+  provider: string
+  config: Record<string, string>
+}
+
 export interface TicketProjectHistory {
   projectId: number
   projectName: string
@@ -387,6 +406,15 @@ export const api = {
   deleteTask: (id: number) => request<void>(`/api/tasks/${id}`, { method: 'DELETE' }),
   dispatchTask: (id: number) => request<Task>(`/api/tasks/${id}/dispatch`, { method: 'POST' }),
   pauseTask: (id: number) => request<Task>(`/api/tasks/${id}/pause`, { method: 'POST' }),
+  listNotifications: () => request<Notification[]>('/api/notifications'),
+  createNotification: (payload: NotificationInput) =>
+    request<Notification>('/api/notifications', { method: 'POST', body: JSON.stringify(payload) }),
+  updateNotification: (id: number, payload: NotificationInput) =>
+    request<Notification>(`/api/notifications/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteNotification: (id: number) => request<void>(`/api/notifications/${id}`, { method: 'DELETE' }),
+  testNotification: (id: number) => request<Notification>(`/api/notifications/${id}/test`, { method: 'POST' }),
+  enableNotification: (id: number) => request<Notification>(`/api/notifications/${id}/enable`, { method: 'POST' }),
+  disableNotification: (id: number) => request<Notification>(`/api/notifications/${id}/disable`, { method: 'POST' }),
   listLogs: (taskId?: number) =>
     request<TaskLog[]>(taskId ? `/api/logs?task_id=${taskId}` : '/api/logs'),
 }

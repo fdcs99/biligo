@@ -11,6 +11,7 @@ import (
 	"github.com/fdcs99/biligo/internal/biliticket"
 	"github.com/fdcs99/biligo/internal/events"
 	"github.com/fdcs99/biligo/internal/model"
+	"github.com/fdcs99/biligo/internal/notify"
 	"github.com/fdcs99/biligo/internal/store"
 	"github.com/fdcs99/biligo/internal/timesync"
 )
@@ -24,6 +25,7 @@ type Manager struct {
 	ticket   *biliticket.Client
 	timeSync TimeSynchronizer
 	hub      *events.Hub
+	notifier *notify.Service
 
 	mu      sync.Mutex
 	running map[int64]context.CancelFunc
@@ -49,8 +51,13 @@ func NewManagerWithTimeSync(store *store.Store, ticket *biliticket.Client, hub *
 		ticket:   ticket,
 		timeSync: timeSync,
 		hub:      hub,
+		notifier: notify.NewService(store, nil, hub),
 		running:  map[int64]context.CancelFunc{},
 	}
+}
+
+func (m *Manager) SetNotifier(notifier *notify.Service) {
+	m.notifier = notifier
 }
 
 func (m *Manager) Dispatch(ctx context.Context, taskID int64) (model.Task, error) {
@@ -376,6 +383,7 @@ func (m *Manager) runOrderFlowWithDeadline(ctx context.Context, taskID int64, co
 		}, "info")
 		if err == nil {
 			m.publishTaskAndLog(task, log)
+			m.notifyTaskSuccess(task)
 		}
 		return true
 	}
@@ -448,6 +456,7 @@ func (m *Manager) runOrderAttempt(ctx context.Context, taskID int64, cookie stri
 	}, "info")
 	if err == nil {
 		m.publishTaskAndLog(task, log)
+		m.notifyTaskSuccess(task)
 	}
 	return orderAttemptFinished
 }
@@ -529,6 +538,12 @@ func (m *Manager) publishTaskAndLog(task model.Task, log model.TaskLog) {
 	m.hub.Publish("task.updated", task)
 	if log.ID > 0 {
 		m.hub.Publish("log.created", log)
+	}
+}
+
+func (m *Manager) notifyTaskSuccess(task model.Task) {
+	if m.notifier != nil {
+		m.notifier.SendTaskSuccess(context.Background(), task)
 	}
 }
 

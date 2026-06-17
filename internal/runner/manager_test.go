@@ -14,6 +14,7 @@ import (
 	"github.com/fdcs99/biligo/internal/biliticket"
 	"github.com/fdcs99/biligo/internal/events"
 	"github.com/fdcs99/biligo/internal/model"
+	"github.com/fdcs99/biligo/internal/notify"
 	"github.com/fdcs99/biligo/internal/store"
 	"github.com/fdcs99/biligo/internal/timesync"
 )
@@ -262,6 +263,64 @@ func TestRunnerWarmupsShowHomeBeforeSaleStart(t *testing.T) {
 	}
 	if headCalls.Load() != saleStartWarmupRequestCount {
 		t.Fatalf("HEAD calls = %d, want %d", headCalls.Load(), saleStartWarmupRequestCount)
+	}
+}
+
+func TestRunnerSendsNotificationOnWaitingPayment(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-1", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-1"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+	if _, err := taskStore.CreateNotification(context.Background(), model.NotificationInput{
+		Name:     "PushPlus",
+		Provider: model.NotificationProviderPushPlus,
+		Config:   map[string]string{"token": "push-token"},
+	}); err != nil {
+		t.Fatalf("CreateNotification: %v", err)
+	}
+	if _, err := taskStore.SetNotificationEnabled(context.Background(), 1, true); err != nil {
+		t.Fatalf("SetNotificationEnabled: %v", err)
+	}
+
+	sender := &fakeRunnerNotificationSender{}
+	hub := events.NewHub()
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), hub, fakeTimeSync{})
+	manager.SetNotifier(notify.NewService(taskStore, sender, hub))
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-1" {
+		t.Fatalf("OrderID = %q, want ORDER-1", updated.OrderID)
+	}
+	waitForNotificationCalls(t, sender, 1)
+	logs, err := taskStore.ListTaskLogs(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("ListTaskLogs: %v", err)
+	}
+	found := false
+	for _, log := range logs {
+		if log.Message == "通知推送成功：PushPlus。" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("notification success log missing: %#v", logs)
 	}
 }
 
@@ -993,6 +1052,27 @@ func waitForTaskCondition(t *testing.T, taskStore *store.Store, taskID int64, co
 	task, _ := taskStore.GetTask(context.Background(), taskID)
 	t.Fatalf("task condition not met; status=%q message=%q", task.Status, task.LastMessage)
 	return model.Task{}
+}
+
+type fakeRunnerNotificationSender struct {
+	calls atomic.Int32
+}
+
+func (f *fakeRunnerNotificationSender) Send(ctx context.Context, notification model.Notification, title string, content string) error {
+	f.calls.Add(1)
+	return nil
+}
+
+func waitForNotificationCalls(t *testing.T, sender *fakeRunnerNotificationSender, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if sender.calls.Load() >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("notification calls = %d, want %d", sender.calls.Load(), want)
 }
 
 func ticketDetailPayload(available bool) map[string]any {

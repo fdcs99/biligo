@@ -73,6 +73,18 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS notifications (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			config TEXT NOT NULL DEFAULT '{}',
+			enabled INTEGER NOT NULL DEFAULT 0,
+			last_test_status TEXT NOT NULL DEFAULT '',
+			last_test_message TEXT NOT NULL DEFAULT '',
+			last_tested_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
 		`CREATE TABLE IF NOT EXISTS tasks (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
@@ -322,6 +334,131 @@ func (s *Store) UpsertTicketProjectHistory(ctx context.Context, project model.Ti
 			updated_at = excluded.updated_at
 	`, project.ProjectID, strings.TrimSpace(project.ProjectName), strings.TrimSpace(project.VenueName), strings.TrimSpace(project.VenueAddress), strings.TrimSpace(project.StartAt), strings.TrimSpace(project.EndAt), now, now)
 	return err
+}
+
+func (s *Store) ListNotifications(ctx context.Context) ([]model.Notification, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, provider, config, enabled, last_test_status, last_test_message, last_tested_at, created_at, updated_at
+		FROM notifications
+		ORDER BY updated_at DESC, id DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	notifications := make([]model.Notification, 0)
+	for rows.Next() {
+		var notification model.Notification
+		if err := scanNotification(rows, &notification); err != nil {
+			return nil, err
+		}
+		notifications = append(notifications, notification)
+	}
+	return notifications, rows.Err()
+}
+
+func (s *Store) ListEnabledNotifications(ctx context.Context) ([]model.Notification, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, provider, config, enabled, last_test_status, last_test_message, last_tested_at, created_at, updated_at
+		FROM notifications
+		WHERE enabled = 1
+		ORDER BY updated_at DESC, id DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	notifications := make([]model.Notification, 0)
+	for rows.Next() {
+		var notification model.Notification
+		if err := scanNotification(rows, &notification); err != nil {
+			return nil, err
+		}
+		notifications = append(notifications, notification)
+	}
+	return notifications, rows.Err()
+}
+
+func (s *Store) CreateNotification(ctx context.Context, input model.NotificationInput) (model.Notification, error) {
+	now := nowText()
+	input = normalizeNotificationInput(input)
+	config, err := marshalJSON(input.Config, "{}")
+	if err != nil {
+		return model.Notification{}, err
+	}
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO notifications (name, provider, config, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, 0, ?, ?)
+	`, strings.TrimSpace(input.Name), input.Provider, config, now, now)
+	if err != nil {
+		return model.Notification{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return model.Notification{}, err
+	}
+	return s.GetNotification(ctx, id)
+}
+
+func (s *Store) GetNotification(ctx context.Context, id int64) (model.Notification, error) {
+	var notification model.Notification
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, name, provider, config, enabled, last_test_status, last_test_message, last_tested_at, created_at, updated_at
+		FROM notifications
+		WHERE id = ?
+	`, id)
+	err := scanNotification(row, &notification)
+	return notification, err
+}
+
+func (s *Store) UpdateNotification(ctx context.Context, id int64, input model.NotificationInput) (model.Notification, error) {
+	now := nowText()
+	input = normalizeNotificationInput(input)
+	config, err := marshalJSON(input.Config, "{}")
+	if err != nil {
+		return model.Notification{}, err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE notifications
+		SET name = ?, provider = ?, config = ?, updated_at = ?
+		WHERE id = ?
+	`, strings.TrimSpace(input.Name), input.Provider, config, now, id); err != nil {
+		return model.Notification{}, err
+	}
+	return s.GetNotification(ctx, id)
+}
+
+func (s *Store) DeleteNotification(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM notifications WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) SetNotificationEnabled(ctx context.Context, id int64, enabled bool) (model.Notification, error) {
+	now := nowText()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE notifications
+		SET enabled = ?, updated_at = ?
+		WHERE id = ?
+	`, boolToInt(enabled), now, id)
+	if err != nil {
+		return model.Notification{}, err
+	}
+	return s.GetNotification(ctx, id)
+}
+
+func (s *Store) SetNotificationTestResult(ctx context.Context, id int64, status string, message string) (model.Notification, error) {
+	now := nowText()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE notifications
+		SET last_test_status = ?, last_test_message = ?, last_tested_at = ?, updated_at = ?
+		WHERE id = ?
+	`, strings.TrimSpace(status), strings.TrimSpace(message), now, now, id)
+	if err != nil {
+		return model.Notification{}, err
+	}
+	return s.GetNotification(ctx, id)
 }
 
 func (s *Store) ListTasks(ctx context.Context) ([]model.Task, error) {
@@ -731,6 +868,34 @@ type taskScanner interface {
 	Scan(dest ...any) error
 }
 
+func scanNotification(scanner taskScanner, notification *model.Notification) error {
+	var config string
+	var enabled int
+	if err := scanner.Scan(
+		&notification.ID,
+		&notification.Name,
+		&notification.Provider,
+		&config,
+		&enabled,
+		&notification.LastTestStatus,
+		&notification.LastTestMessage,
+		&notification.LastTestedAt,
+		&notification.CreatedAt,
+		&notification.UpdatedAt,
+	); err != nil {
+		return err
+	}
+	notification.Provider = model.NormalizeNotificationProvider(notification.Provider)
+	notification.Enabled = enabled != 0
+	if err := unmarshalJSON(config, &notification.Config); err != nil {
+		return err
+	}
+	if notification.Config == nil {
+		notification.Config = map[string]string{}
+	}
+	return nil
+}
+
 func scanTask(scanner taskScanner, task *model.Task) error {
 	var isHotProject int
 	var buyerInfo string
@@ -833,6 +998,23 @@ func normalizeTaskInput(input model.TaskInput) model.TaskInput {
 	if input.PollIntervalMillis <= 0 {
 		input.PollIntervalMillis = 1000
 	}
+	return input
+}
+
+func normalizeNotificationInput(input model.NotificationInput) model.NotificationInput {
+	input.Provider = model.NormalizeNotificationProvider(input.Provider)
+	if input.Config == nil {
+		input.Config = map[string]string{}
+	}
+	normalizedConfig := make(map[string]string, len(input.Config))
+	for key, value := range input.Config {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		normalizedConfig[key] = strings.TrimSpace(value)
+	}
+	input.Config = normalizedConfig
 	return input
 }
 

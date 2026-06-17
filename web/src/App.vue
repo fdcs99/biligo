@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import {
+  Bell,
   Check,
   CirclePlus,
   Close,
@@ -24,6 +25,8 @@ import type {
   AccountInput,
   EventSnapshot,
   Health,
+  Notification,
+  NotificationInput,
   SessionSummary,
   Task,
   TaskInput,
@@ -45,12 +48,13 @@ import {
   setUnauthorizedHandler,
 } from './api'
 
-type SectionKey = 'accounts' | 'taskConfig' | 'taskStatus'
+type SectionKey = 'accounts' | 'notifications' | 'taskConfig' | 'taskStatus'
 type QRLoginStatus = 'idle' | 'generated' | 'waiting_scan' | 'waiting_confirm' | 'confirmed' | 'expired' | 'failed'
 type TicketProjectHistorySuggestion = TicketProjectHistory & { value: string }
 
 const sections: Array<{ key: SectionKey; label: string }> = [
   { key: 'accounts', label: '哔哩哔哩账号管理' },
+  { key: 'notifications', label: '通知管理' },
   { key: 'taskConfig', label: '任务配置' },
   { key: 'taskStatus', label: '任务管理' },
 ]
@@ -70,17 +74,27 @@ const panelAuth = reactive({
 })
 
 const accounts = ref<Account[]>([])
+const notifications = ref<Notification[]>([])
 const ticketProjectHistories = ref<TicketProjectHistory[]>([])
 const tasks = ref<Task[]>([])
 const logs = ref<TaskLog[]>([])
 
 const editingAccountId = ref<number | null>(null)
+const editingNotificationId = ref<number | null>(null)
 const editingTaskId = ref<number | null>(null)
 
 const accountForm = reactive<AccountInput>({
   name: '',
   cookie: '',
   note: '',
+})
+
+const notificationForm = reactive<NotificationInput>({
+  name: '',
+  provider: 'pushplus',
+  config: {
+    token: '',
+  },
 })
 
 const qrLogin = reactive({
@@ -180,6 +194,11 @@ const canSaveTask = computed(
     taskForm.tel.trim() !== '' &&
     taskForm.pollIntervalMillis > 0,
 )
+const canSaveNotification = computed(
+  () => notificationForm.name.trim() !== '' &&
+    ['pushplus', 'bark'].includes(notificationForm.provider) &&
+    (notificationForm.config.token ?? '').trim() !== '',
+)
 
 async function run(action: () => Promise<void>, success?: string) {
   loading.value = true
@@ -201,15 +220,17 @@ async function loadAll() {
   await run(async () => {
     health.value = await api.health()
 
-    const [sessionData, accountData, historyData, taskData, logData] = await Promise.all([
+    const [sessionData, accountData, notificationData, historyData, taskData, logData] = await Promise.all([
       api.session(),
       api.listAccounts(),
+      api.listNotifications(),
       api.listTicketProjectHistory(),
       api.listTasks(),
       api.listLogs(),
     ])
     session.value = sessionData
     accounts.value = accountData ?? []
+    notifications.value = notificationData ?? []
     ticketProjectHistories.value = historyData ?? []
     tasks.value = taskData ?? []
     logs.value = logData ?? []
@@ -349,6 +370,7 @@ function setActiveSection(section: SectionKey) {
 function sectionIcon(section: SectionKey) {
   const map = {
     accounts: User,
+    notifications: Bell,
     taskConfig: Setting,
     taskStatus: Monitor,
   }
@@ -533,6 +555,93 @@ async function deleteAccount(id: number) {
     await api.deleteAccount(id)
     await refreshAccountsAndSession()
   }, '账号已删除')
+}
+
+function resetNotificationForm() {
+  editingNotificationId.value = null
+  Object.assign(notificationForm, {
+    name: '',
+    provider: 'pushplus',
+    config: {
+      token: '',
+    },
+  })
+}
+
+function editNotification(notification: Notification) {
+  editingNotificationId.value = notification.id
+  Object.assign(notificationForm, {
+    name: notification.name,
+    provider: notification.provider,
+    config: {
+      token: notification.config?.token ?? '',
+    },
+  })
+  activeSection.value = 'notifications'
+}
+
+async function saveNotification() {
+  await run(async () => {
+    const payload: NotificationInput = {
+      name: notificationForm.name.trim(),
+      provider: notificationForm.provider,
+      config: {
+        token: (notificationForm.config.token ?? '').trim(),
+      },
+    }
+    if (editingNotificationId.value) {
+      await api.updateNotification(editingNotificationId.value, payload)
+    } else {
+      await api.createNotification(payload)
+    }
+    notifications.value = await api.listNotifications()
+    resetNotificationForm()
+  }, editingNotificationId.value ? '通知接口已更新' : '通知接口已添加')
+}
+
+async function confirmDeleteNotification(notification: Notification) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除通知接口「${notification.name}」？`,
+      '删除通知接口',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return
+  }
+  await run(async () => {
+    await api.deleteNotification(notification.id)
+    notifications.value = await api.listNotifications()
+    if (editingNotificationId.value === notification.id) {
+      resetNotificationForm()
+    }
+  }, '通知接口已删除')
+}
+
+async function testNotification(id: number) {
+  await run(async () => {
+    const notification = await api.testNotification(id)
+    notifications.value = await api.listNotifications()
+    if (notification.lastTestStatus === 'error') {
+      throw new Error(notification.lastTestMessage || '通知接口检测失败')
+    }
+  }, '测试推送已发送')
+}
+
+async function setNotificationEnabled(id: number, enabled: boolean) {
+  await run(async () => {
+    if (enabled) {
+      await api.enableNotification(id)
+    } else {
+      await api.disableNotification(id)
+    }
+    notifications.value = await api.listNotifications()
+  }, enabled ? '通知接口已启用' : '通知接口已停用')
 }
 
 function resetTaskForm() {
@@ -1445,6 +1554,36 @@ function accountStatusTagType(account: Account) {
   return 'warning'
 }
 
+function notificationProviderLabel(provider: string) {
+  if (provider === 'pushplus') {
+    return 'PushPlus'
+  }
+  if (provider === 'bark') {
+    return 'Bark'
+  }
+  return provider || '-'
+}
+
+function notificationTokenLabel(provider: string) {
+  return provider === 'bark' ? 'Bark Token 或完整推送地址' : 'PushPlus Token'
+}
+
+function notificationTokenPlaceholder(provider: string) {
+  return provider === 'bark'
+    ? '例如：jmGYKxxxxx 或 https://bark.example.app/jmGYKxxxxx'
+    : '填写 PushPlus Token'
+}
+
+function notificationTestTagType(status: string) {
+  if (status === 'success') {
+    return 'success'
+  }
+  if (status === 'error') {
+    return 'danger'
+  }
+  return 'info'
+}
+
 function taskStatusClass(status: string) {
   if (status === 'waiting_payment' || status === 'succeeded') {
     return 'ready'
@@ -1719,6 +1858,74 @@ onUnmounted(() => {
             </div>
           </article>
           <el-empty v-if="accounts.length === 0" description="暂无账号" />
+        </section>
+      </section>
+
+      <section v-if="activeSection === 'notifications'" class="content-grid">
+        <el-form class="panel form-panel" label-position="top" @submit.prevent="saveNotification">
+          <div class="panel-heading">
+            <h3>{{ editingNotificationId ? '编辑通知接口' : '新增通知接口' }}</h3>
+            <el-button :icon="Close" text @click="resetNotificationForm">清空</el-button>
+          </div>
+          <el-form-item required label="接口名称">
+            <el-input v-model="notificationForm.name" placeholder="例如：我的手机" clearable />
+          </el-form-item>
+          <el-form-item required label="接口类型">
+            <el-radio-group v-model="notificationForm.provider">
+              <el-radio-button label="pushplus">PushPlus</el-radio-button>
+              <el-radio-button label="bark">Bark</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item required :label="notificationTokenLabel(notificationForm.provider)">
+            <el-input
+              v-model="notificationForm.config.token"
+              type="textarea"
+              :rows="3"
+              :placeholder="notificationTokenPlaceholder(notificationForm.provider)"
+            />
+          </el-form-item>
+          <el-alert type="info" show-icon :closable="false" class="form-tip-alert">
+            <template #title>
+              PushPlus 用 Token 推送；Bark 可填写 App 中的 Token，也可填写自建服务完整推送地址。
+            </template>
+          </el-alert>
+          <el-button native-type="submit" type="primary" :icon="Document" :disabled="!canSaveNotification" :loading="loading">
+            保存通知接口
+          </el-button>
+        </el-form>
+
+        <section class="panel list-panel">
+          <div class="panel-heading">
+            <h3>通知接口</h3>
+            <span class="muted">{{ notifications.length }} 个接口</span>
+          </div>
+          <article v-for="notification in notifications" :key="notification.id" class="item-card">
+            <div>
+              <h4>{{ notification.name }}</h4>
+              <p>{{ notificationProviderLabel(notification.provider) }}</p>
+              <small>{{ notification.config?.token || '未填写配置' }}</small>
+              <small v-if="notification.lastTestStatus">
+                最近检测：{{ notification.lastTestMessage || '-' }} {{ notification.lastTestedAt ? `· ${notification.lastTestedAt}` : '' }}
+              </small>
+            </div>
+            <div class="actions">
+              <el-tag :type="notification.enabled ? 'success' : 'info'">{{ notification.enabled ? '已启用' : '未启用' }}</el-tag>
+              <el-tag :type="notificationTestTagType(notification.lastTestStatus)">
+                {{ notification.lastTestStatus || '未检测' }}
+              </el-tag>
+              <el-button :icon="Check" :loading="loading" @click="testNotification(notification.id)">检测</el-button>
+              <el-button
+                :type="notification.enabled ? undefined : 'primary'"
+                :icon="SwitchButton"
+                @click="setNotificationEnabled(notification.id, !notification.enabled)"
+              >
+                {{ notification.enabled ? '停用' : '启用' }}
+              </el-button>
+              <el-button :icon="Edit" @click="editNotification(notification)">编辑</el-button>
+              <el-button type="danger" plain :icon="Delete" @click="confirmDeleteNotification(notification)">删除</el-button>
+            </div>
+          </article>
+          <el-empty v-if="notifications.length === 0" description="暂无通知接口" />
         </section>
       </section>
 

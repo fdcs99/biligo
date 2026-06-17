@@ -6,6 +6,9 @@ const (
 	TimeSyncStrategyBilibili = "bilibili"
 	TimeSyncStrategyLocal    = "local"
 
+	NotificationProviderPushPlus = "pushplus"
+	NotificationProviderBark     = "bark"
+
 	TaskModeRush    = "rush"
 	TaskModeRestock = "restock"
 	TaskModeHybrid  = "rush_restock"
@@ -107,6 +110,25 @@ type PanelLoginInput struct {
 type PanelAuthResponse struct {
 	Token     string `json:"token,omitempty"`
 	ExpiresAt string `json:"expiresAt"`
+}
+
+type Notification struct {
+	ID              int64             `json:"id"`
+	Name            string            `json:"name"`
+	Provider        string            `json:"provider"`
+	Config          map[string]string `json:"config"`
+	Enabled         bool              `json:"enabled"`
+	LastTestStatus  string            `json:"lastTestStatus"`
+	LastTestMessage string            `json:"lastTestMessage"`
+	LastTestedAt    string            `json:"lastTestedAt"`
+	CreatedAt       string            `json:"createdAt"`
+	UpdatedAt       string            `json:"updatedAt"`
+}
+
+type NotificationInput struct {
+	Name     string            `json:"name"`
+	Provider string            `json:"provider"`
+	Config   map[string]string `json:"config"`
 }
 
 type TicketProjectHistory struct {
@@ -298,6 +320,17 @@ func NormalizeTimeSyncStrategy(strategy string) string {
 		return TimeSyncStrategyLocal
 	default:
 		return TimeSyncStrategyBilibili
+	}
+}
+
+func NormalizeNotificationProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case NotificationProviderPushPlus:
+		return NotificationProviderPushPlus
+	case NotificationProviderBark:
+		return NotificationProviderBark
+	default:
+		return ""
 	}
 }
 

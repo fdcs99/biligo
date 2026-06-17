@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"github.com/fdcs99/biligo/internal/biliticket"
 	"github.com/fdcs99/biligo/internal/events"
 	"github.com/fdcs99/biligo/internal/model"
+	"github.com/fdcs99/biligo/internal/notify"
 	"github.com/fdcs99/biligo/internal/panelauth"
 	"github.com/fdcs99/biligo/internal/runner"
 	"github.com/fdcs99/biligo/internal/store"
@@ -33,10 +35,12 @@ type Handler struct {
 	runner *runner.Manager
 	panel  *panelauth.Manager
 	logger *applog.Logger
+	notify notify.Sender
 }
 
 type RouterOptions struct {
-	WebFS fs.FS
+	WebFS              fs.FS
+	NotificationSender notify.Sender
 }
 
 type RouterOption func(*RouterOptions)
@@ -44,6 +48,12 @@ type RouterOption func(*RouterOptions)
 func WithWebFS(webFS fs.FS) RouterOption {
 	return func(options *RouterOptions) {
 		options.WebFS = webFS
+	}
+}
+
+func WithNotificationSender(sender notify.Sender) RouterOption {
+	return func(options *RouterOptions) {
+		options.NotificationSender = sender
 	}
 }
 
@@ -63,14 +73,21 @@ func NewRouter(store *store.Store, panel *panelauth.Manager, logger *applog.Logg
 
 	hub := events.NewHub(logger)
 	ticket := biliticket.NewClient(nil)
+	notificationSender := options.NotificationSender
+	if notificationSender == nil {
+		notificationSender = notify.NewHTTPSender(nil)
+	}
+	runnerManager := runner.NewManager(store, ticket, hub)
+	runnerManager.SetNotifier(notify.NewService(store, notificationSender, hub))
 	handler := &Handler{
 		store:  store,
 		auth:   biliauth.NewClient(nil),
 		ticket: ticket,
 		hub:    hub,
-		runner: runner.NewManager(store, ticket, hub),
+		runner: runnerManager,
 		panel:  panel,
 		logger: logger,
+		notify: notificationSender,
 	}
 	api := router.Group("/api")
 	{
@@ -107,6 +124,14 @@ func NewRouter(store *store.Store, panel *panelauth.Manager, logger *applog.Logg
 			protected.POST("/tasks/:id/dispatch", handler.dispatchTask)
 			protected.POST("/tasks/:id/pause", handler.pauseTask)
 			protected.GET("/tasks/:id/logs", handler.listTaskLogs)
+
+			protected.GET("/notifications", handler.listNotifications)
+			protected.POST("/notifications", handler.createNotification)
+			protected.PUT("/notifications/:id", handler.updateNotification)
+			protected.DELETE("/notifications/:id", handler.deleteNotification)
+			protected.POST("/notifications/:id/test", handler.testNotification)
+			protected.POST("/notifications/:id/enable", handler.enableNotification)
+			protected.POST("/notifications/:id/disable", handler.disableNotification)
 
 			protected.GET("/logs", handler.listLogs)
 		}
@@ -612,6 +637,114 @@ func (h *Handler) fetchTicketAccountContext(c *gin.Context) {
 	c.JSON(http.StatusOK, context)
 }
 
+func (h *Handler) listNotifications(c *gin.Context) {
+	notifications, err := h.store.ListNotifications(c.Request.Context())
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, notifications)
+}
+
+func (h *Handler) createNotification(c *gin.Context) {
+	var input model.NotificationInput
+	if !bindJSON(c, &input) || !validateNotificationInput(c, input) {
+		return
+	}
+	notification, err := h.store.CreateNotification(c.Request.Context(), input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, notification)
+}
+
+func (h *Handler) updateNotification(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var input model.NotificationInput
+	if !bindJSON(c, &input) || !validateNotificationInput(c, input) {
+		return
+	}
+	notification, err := h.store.UpdateNotification(c.Request.Context(), id, input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, notification)
+}
+
+func (h *Handler) deleteNotification(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	if err := h.store.DeleteNotification(c.Request.Context(), id); err != nil {
+		respondError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) testNotification(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	notification, err := h.store.GetNotification(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	sender := h.notify
+	if sender == nil {
+		sender = notify.NewHTTPSender(nil)
+	}
+	sendCtx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	err = sender.Send(sendCtx, notification, "Biligo 通知测试", "这是一条 Biligo 通知接口测试消息。")
+	cancel()
+	status := "success"
+	message := "测试推送已发送。"
+	if err != nil {
+		status = "error"
+		message = err.Error()
+	}
+	notification, updateErr := h.store.SetNotificationTestResult(c.Request.Context(), id, status, message)
+	if updateErr != nil {
+		respondError(c, updateErr)
+		return
+	}
+	c.JSON(http.StatusOK, notification)
+}
+
+func (h *Handler) enableNotification(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	notification, err := h.store.SetNotificationEnabled(c.Request.Context(), id, true)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, notification)
+}
+
+func (h *Handler) disableNotification(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	notification, err := h.store.SetNotificationEnabled(c.Request.Context(), id, false)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, notification)
+}
+
 func (h *Handler) listTasks(c *gin.Context) {
 	tasks, err := h.store.ListTasks(c.Request.Context())
 	if err != nil {
@@ -739,6 +872,26 @@ func (h *Handler) listLogs(c *gin.Context) {
 func bindJSON(c *gin.Context, target any) bool {
 	if err := c.ShouldBindJSON(target); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体不是有效 JSON"})
+		return false
+	}
+	return true
+}
+
+func validateNotificationInput(c *gin.Context, input model.NotificationInput) bool {
+	if !requireName(c, input.Name, "通知名称不能为空") {
+		return false
+	}
+	provider := model.NormalizeNotificationProvider(input.Provider)
+	if provider == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "通知类型必须是 pushplus 或 bark"})
+		return false
+	}
+	if strings.TrimSpace(input.Config["token"]) == "" {
+		if provider == model.NotificationProviderPushPlus {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "PushPlus Token 不能为空"})
+			return false
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Bark Token 或完整推送地址不能为空"})
 		return false
 	}
 	return true

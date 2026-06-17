@@ -715,6 +715,93 @@
 
 实际响应会包含完整任务对象。
 
+## 通知管理
+
+通知接口用于在任务成功进入支付前状态时推送提醒。当前支持 `pushplus` 和 `bark`，可同时启用多个接口。
+
+通知对象：
+
+```json
+{
+  "id": 1,
+  "name": "我的手机",
+  "provider": "pushplus",
+  "config": {
+    "token": "pushplus-token"
+  },
+  "enabled": true,
+  "lastTestStatus": "success",
+  "lastTestMessage": "测试推送已发送。",
+  "lastTestedAt": "2026-06-17T20:00:00+08:00",
+  "createdAt": "2026-06-17T19:50:00+08:00",
+  "updatedAt": "2026-06-17T20:00:00+08:00"
+}
+```
+
+### GET `/api/notifications`
+
+获取全部通知接口。
+
+响应：通知对象数组。
+
+### POST `/api/notifications`
+
+新增通知接口。新增后默认未启用。
+
+请求：
+
+```json
+{
+  "name": "PushPlus",
+  "provider": "pushplus",
+  "config": {
+    "token": "pushplus-token"
+  }
+}
+```
+
+`provider=bark` 时，`config.token` 可以填写 Bark Token，也可以填写完整自建推送地址。
+
+响应：`201 Created`，返回通知对象。
+
+### PUT `/api/notifications/{id}`
+
+更新通知接口名称、类型和配置。
+
+请求体同新增接口。
+
+响应：更新后的通知对象。
+
+### DELETE `/api/notifications/{id}`
+
+删除通知接口。
+
+响应：`204 No Content`。
+
+### POST `/api/notifications/{id}/test`
+
+检测通知接口。后端会真实发送一条测试推送，并将检测结果写入 `lastTestStatus`、`lastTestMessage`、`lastTestedAt`。
+
+响应：更新后的通知对象。发送失败时接口仍返回 `200`，前端根据 `lastTestStatus=error` 展示失败原因。
+
+### POST `/api/notifications/{id}/enable`
+
+启用通知接口。允许多个通知接口同时启用。
+
+响应：更新后的通知对象。
+
+### POST `/api/notifications/{id}/disable`
+
+停用通知接口。
+
+响应：更新后的通知对象。
+
+### 抢票成功推送
+
+当任务成功进入 `waiting_payment` 状态时，后端会向所有已启用通知接口推送“Biligo 抢票成功”。通知正文包含任务名、项目名、票种、数量、订单号和支付提示。
+
+通知发送失败不会改变任务状态；成功或失败结果会写入任务日志，并通过 SSE 的 `log.created` 事件同步给前端。
+
 ## 任务日志
 
 ### GET `/api/tasks/{id}/logs`
