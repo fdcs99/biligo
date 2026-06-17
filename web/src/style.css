@@ -146,6 +146,12 @@ p {
 }
 
 .nav-list .el-button {
+  --el-button-hover-bg-color: #3c3f46;
+  --el-button-hover-text-color: #ffffff;
+  --el-button-hover-border-color: transparent;
+  --el-button-active-bg-color: #3c3f46;
+  --el-button-active-text-color: #ffffff;
+  --el-button-active-border-color: transparent;
   justify-content: flex-start;
   width: 100%;
   min-height: 44px;
@@ -160,7 +166,17 @@ p {
   color: #ffffff;
 }
 
+.sidebar .nav-list .el-button:focus,
+.sidebar .nav-list .el-button:hover {
+  background: #3c3f46;
+  border-color: transparent;
+  color: #ffffff;
+}
+
 .drawer-nav .el-button {
+  --el-button-hover-bg-color: #f4eadb;
+  --el-button-hover-text-color: #834131;
+  --el-button-hover-border-color: transparent;
   color: #22242a;
 }
 
@@ -283,6 +299,47 @@ p {
 
 .panel-heading h3 {
   font-size: 18px;
+}
+
+.global-message-alert,
+.qr-message-alert {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border-width: 1px;
+  border-style: solid;
+  border-color: #d8d2c7;
+  box-shadow: 0 8px 18px rgb(34 36 42 / 5%);
+}
+
+.global-message-alert {
+  align-self: stretch;
+  padding: 20px 14px;
+}
+
+.global-message-alert .el-alert__content,
+.qr-message-alert .el-alert__content {
+  flex: 1;
+  min-width: 0;
+}
+
+.global-message-alert .el-alert__title,
+.qr-message-alert .el-alert__title {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.global-message-alert.el-alert--success {
+  border-color: #badbcc;
+}
+
+.global-message-alert.el-alert--error {
+  border-color: #f2b8b5;
+}
+
+.qr-message-alert {
+  background: #fffaf2;
 }
 
 .input-action-row {
@@ -540,6 +597,24 @@ p {
 .log-panel {
   max-height: 420px;
   overflow: auto;
+}
+
+.log-heading-title {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.log-heading-title h3 {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.log-subtitle {
+  max-width: min(560px, 100%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .log-line {

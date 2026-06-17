@@ -806,6 +806,7 @@ async function fetchTicketProject() {
     }
     const previousTicketValue = selectedTicketValue.value
     const previousTicketValues = [...selectedTicketValues.value]
+    const shouldUpdateTaskName = shouldReplaceAutoTaskName(taskForm.name, taskForm.projectName || fetchedTicketProject.value?.projectName || '')
     const project = await api.fetchTicketProject({
       projectInput,
       accountId: 0,
@@ -818,14 +819,19 @@ async function fetchTicketProject() {
     clearPurchaseFields()
     selectedTicketValues.value = previousTicketValues.filter((value) => ticketOptions.value.some((ticket) => ticket.value === value))
     if (hasRestockTaskSection.value && selectedTicketValues.value.length > 0) {
-      applySelectedRestockTickets()
+      applySelectedRestockTickets(shouldUpdateTaskName)
     } else if (previousTicketValue && ticketOptions.value.some((ticket) => ticket.value === previousTicketValue)) {
       selectedTicketValue.value = previousTicketValue
-      selectTicketOption()
+      selectTicketOption(shouldUpdateTaskName)
     } else {
       selectedTicketValue.value = ''
       selectedTicketValues.value = []
       clearSelectedTicketFields()
+      if (shouldUpdateTaskName) {
+        taskForm.projectId = project.projectId
+        taskForm.projectName = project.projectName
+        taskForm.name = autoTaskName(project.projectName)
+      }
     }
     ticketProjectHistories.value = await api.listTicketProjectHistory()
   }, '票务信息已获取')
@@ -855,11 +861,11 @@ function applyTicketAccountContext(context: TicketAccountContext) {
   taskForm.phone = context.phone ?? ''
 }
 
-function selectTicketOption() {
-	const ticket = selectedTicketOption.value
-	if (!ticket || !fetchedTicketProject.value) {
-		clearSelectedTicketFields()
-		return
+function selectTicketOption(forceNameUpdate = false) {
+  const ticket = selectedTicketOption.value
+  if (!ticket || !fetchedTicketProject.value) {
+    clearSelectedTicketFields()
+    return
   }
   const defaultEndAt = defaultEndAtFromSaleStart(ticket.saleStart)
   Object.assign(taskForm, {
@@ -878,18 +884,16 @@ function selectTicketOption() {
     payMoney: ticket.price * taskForm.buyerInfo.length,
     endAt: defaultEndAt,
   })
-  if (!taskForm.name.trim()) {
-    taskForm.name = [fetchedTicketProject.value.projectName, ticket.screenName, ticket.ticketLevel]
-      .filter(Boolean)
-	      .join(' ')
-	  }
-	}
+  if (forceNameUpdate || !taskForm.name.trim()) {
+    taskForm.name = autoTaskName(fetchedTicketProject.value.projectName, ticket)
+  }
+}
 
 function selectRestockTickets() {
   applySelectedRestockTickets()
 }
 
-function applySelectedRestockTickets() {
+function applySelectedRestockTickets(forceNameUpdate = false) {
   const tickets = selectedTicketOptions.value
   taskForm.selectedTickets = tickets
   if (tickets.length === 0) {
@@ -905,10 +909,8 @@ function applySelectedRestockTickets() {
   if (!isRestockTaskForm.value) {
     taskForm.projectId = primary.projectId
     taskForm.projectName = fetchedTicketProject.value.projectName
-    if (!taskForm.name.trim()) {
-      taskForm.name = [fetchedTicketProject.value.projectName, '抢票+回流']
-        .filter(Boolean)
-        .join(' ')
+    if (forceNameUpdate || !taskForm.name.trim()) {
+      taskForm.name = autoTaskName(fetchedTicketProject.value.projectName)
     }
     return
   }
@@ -927,11 +929,28 @@ function applySelectedRestockTickets() {
     isHotProject: primary.isHotProject,
     payMoney: primary.price * taskForm.buyerInfo.length,
   })
-  if (!taskForm.name.trim()) {
-    taskForm.name = [fetchedTicketProject.value.projectName, '回流蹲票']
-      .filter(Boolean)
-      .join(' ')
+  if (forceNameUpdate || !taskForm.name.trim()) {
+    taskForm.name = autoTaskName(fetchedTicketProject.value.projectName, primary)
   }
+}
+
+function autoTaskName(projectName: string, ticket?: TicketOption) {
+  if (taskForm.taskMode === 'restock') {
+    return [projectName, '回流蹲票'].filter(Boolean).join(' ')
+  }
+  if (taskForm.taskMode === 'rush_restock') {
+    return [projectName, '抢票+回流'].filter(Boolean).join(' ')
+  }
+  return [projectName, ticket?.screenName, ticket?.ticketLevel].filter(Boolean).join(' ')
+}
+
+function shouldReplaceAutoTaskName(currentName: string, previousProjectName: string) {
+  const name = currentName.trim()
+  const projectName = previousProjectName.trim()
+  if (!name) {
+    return true
+  }
+  return projectName !== '' && (name === projectName || name.startsWith(`${projectName} `))
 }
 
 function defaultEndAtFromSaleStart(saleStart: string) {
@@ -1456,6 +1475,20 @@ const qrStatusLabel = computed(() => {
   return map[qrLogin.status]
 })
 
+const qrStatusMessage = computed(() => qrLogin.message || '尚未生成登录二维码。')
+const qrMessageAlertType = computed(() => {
+  if (qrLogin.status === 'confirmed') {
+    return 'success'
+  }
+  if (qrLogin.status === 'expired' || qrLogin.status === 'failed') {
+    return 'error'
+  }
+  if (qrLogin.status === 'waiting_scan' || qrLogin.status === 'waiting_confirm') {
+    return 'warning'
+  }
+  return 'info'
+})
+
 function qrStatusClass() {
   if (qrLogin.status === 'confirmed') {
     return 'ready'
@@ -1506,7 +1539,7 @@ onUnmounted(() => {
         <h1>票务控制台</h1>
         <p class="muted">请输入本地面板密码后继续。</p>
       </div>
-      <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" />
+      <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="global-message-alert" />
       <el-form-item required label="面板密码">
         <el-input
           v-model="panelAuth.password"
@@ -1579,8 +1612,8 @@ onUnmounted(() => {
         </div>
       </header>
 
-      <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" />
-      <el-alert v-if="notice" :title="notice" type="success" show-icon :closable="false" />
+      <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="global-message-alert" />
+      <el-alert v-if="notice" :title="notice" type="success" show-icon :closable="false" class="global-message-alert" />
 
       <section v-if="activeSection === 'accounts'" class="content-grid">
         <div class="stack-column">
@@ -1602,9 +1635,15 @@ onUnmounted(() => {
               <span class="muted">{{ qrLogin.autoPolling ? '自动轮询中' : '自动轮询已停止' }}</span>
               <span v-if="qrLogin.lastCheckedAt" class="muted">上次检查 {{ qrLogin.lastCheckedAt }}</span>
             </div>
+            <el-alert
+              :title="qrStatusMessage"
+              :type="qrMessageAlertType"
+              show-icon
+              :closable="false"
+              class="qr-message-alert"
+            />
             <div v-if="qrLogin.qrImageDataUrl" class="qr-preview">
               <img :src="qrLogin.qrImageDataUrl" alt="Bilibili 登录二维码" />
-              <span>{{ qrLogin.message }}</span>
             </div>
             <div class="button-row">
               <el-button type="primary" :icon="CirclePlus" :loading="loading || qrLogin.polling" @click="startQRLogin">
@@ -2110,9 +2149,9 @@ onUnmounted(() => {
 
         <section class="panel log-panel">
           <div class="panel-heading">
-            <div>
+            <div class="log-heading-title">
               <h3>运行日志</h3>
-              <small v-if="selectedTaskTicketSubtitle" class="muted">{{ selectedTaskTicketSubtitle }}</small>
+              <small v-if="selectedTaskTicketSubtitle" class="muted log-subtitle">{{ selectedTaskTicketSubtitle }}</small>
             </div>
             <el-button text :icon="Document" @click="showAllLogs">全部</el-button>
           </div>
