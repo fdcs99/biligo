@@ -502,7 +502,7 @@ func TestRestockModeLogsRepeatedStatusChecks(t *testing.T) {
 	}
 	defer manager.Cancel(task.ID)
 
-	expectedMessage := restockStatusMessage()
+	expectedMessage := "票档暂不可购买，继续检测"
 	first := waitForTaskCondition(t, taskStore, task.ID, func(task model.Task) bool {
 		return task.LastMessage == expectedMessage && task.LastCheckedAt != ""
 	})
