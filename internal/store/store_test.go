@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/fdcs99/biligo/internal/model"
 )
@@ -59,6 +60,12 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	if task.TimeSyncStrategy != model.TimeSyncStrategyBilibili {
 		t.Fatalf("TimeSyncStrategy = %q, want %q", task.TimeSyncStrategy, model.TimeSyncStrategyBilibili)
 	}
+	if task.TaskMode != model.TaskModeRush {
+		t.Fatalf("TaskMode = %q, want %q", task.TaskMode, model.TaskModeRush)
+	}
+	if task.DurationMode != model.DurationModeLimited {
+		t.Fatalf("DurationMode = %q, want %q", task.DurationMode, model.DurationModeLimited)
+	}
 	if task.PollIntervalMillis != 200 {
 		t.Fatalf("PollIntervalMillis = %d, want 200", task.PollIntervalMillis)
 	}
@@ -111,6 +118,8 @@ func TestMigrateCreatesCurrentTaskSchemaOnly(t *testing.T) {
 		"sale_status",
 		"link_id",
 		"is_hot_project",
+		"task_mode",
+		"duration_mode",
 		"order_type",
 		"pay_money",
 		"buyer_info",
@@ -195,6 +204,29 @@ func TestPauseInterruptedTasks(t *testing.T) {
 	}
 	if draft.Status != "draft" {
 		t.Fatalf("draft status = %q, want draft", draft.Status)
+	}
+}
+
+func TestSetTaskRuntimeFillsLastCheckedAt(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	task := createTestTask(t, store, "最近检测任务")
+	updated, _, err := store.SetTaskRuntime(context.Background(), task.ID, model.TaskRuntimeUpdate{
+		Status:      "running",
+		LastMessage: "运行中",
+	}, "info")
+	if err != nil {
+		t.Fatalf("SetTaskRuntime: %v", err)
+	}
+	if updated.LastCheckedAt == "" {
+		t.Fatal("LastCheckedAt should be filled")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, updated.LastCheckedAt); err != nil {
+		t.Fatalf("LastCheckedAt should be RFC3339Nano: %v", err)
 	}
 }
 

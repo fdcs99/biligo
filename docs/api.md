@@ -438,11 +438,14 @@
       "priceText": "￥680",
       "saleStatus": "可购买",
       "saleStart": "2026-06-01 12:00:00",
-      "isHotProject": false
+      "isHotProject": false,
+      "clickable": true
     }
   ]
 }
 ```
+
+说明：`clickable` 来自票档原始字段，回流捡漏模式以 `clickable === true` 作为当前票档可进入下单流程的判断依据
 
 ### POST `/api/ticket-projects/account-context`
 
@@ -515,6 +518,8 @@
     "saleStatus": "可购买",
     "linkId": 0,
     "isHotProject": false,
+    "taskMode": "rush",
+    "durationMode": "limited",
     "orderType": 1,
     "payMoney": 136000,
     "buyerInfo": [
@@ -561,7 +566,7 @@
 | --- | --- |
 | `draft` | 草稿，已创建但未下发 |
 | `waiting_start` | 已下发，等待票档起售时间 |
-| `running` | 已到起售时间，正在直接尝试订单流程；运行中的接口错误会记录日志并继续重试 |
+| `running` | 任务运行中。抢票模式表示已到起售时间并直接尝试订单流程；回流捡漏模式表示正在检测票档状态 |
 | `waiting_payment` | 已创建订单，等待用户支付 |
 | `succeeded` | 订单接口成功但没有可展示的支付二维码 |
 | `duplicate_order` | 检测到重复订单 |
@@ -590,6 +595,8 @@
   "saleStatus": "可购买",
   "linkId": 0,
   "isHotProject": false,
+  "taskMode": "rush",
+  "durationMode": "limited",
   "orderType": 1,
   "payMoney": 136000,
   "buyerInfo": [
@@ -628,7 +635,17 @@
 - `payMoney <= 0` 且 `ticketPrice > 0` 时，后端按票价乘购票人数补齐。
 - `pollIntervalMillis <= 0` 时后端默认修正为 `1000`，单位为毫秒。
 - `timeSyncStrategy` 可选值为 `bilibili` 或 `local`，为空时默认 `bilibili`。
+- `taskMode` 可选值为 `rush` 或 `restock`，为空时默认 `rush`。
+- `durationMode` 可选值为 `limited` 或 `unlimited`，为空时默认 `limited`。
+- `taskMode=restock` 且 `durationMode=limited` 时，下发前需要设置合法 `endAt`；`durationMode=unlimited` 时不需要 `endAt`。
 - Web 控制台要求先获取票务信息、选择票信息、购票人和收货地址，再保存任务。
+
+任务模式：
+
+| 模式 | 说明 |
+| --- | --- |
+| `rush` | 抢票模式。下发后按时间同步策略等待起售时间，起售后直接尝试订单流程。 |
+| `restock` | 回流捡漏模式。下发后不等待开票、不进行时间同步，直接轮询票档 `clickable`；`clickable=true` 后提交订单。 |
 
 时间同步策略：
 
@@ -655,7 +672,12 @@
 
 ### POST `/api/tasks/{id}/dispatch`
 
-下发任务。后端会先按任务的 `timeSyncStrategy` 同步时间，并写入 `timeOffsetMillis` 与 `timeSyncedAt`；随后启动内置任务运行器，使用“本地时间 + offset”等待票档起售时间。距离起售不足 30 秒时会向 `https://show.bilibili.com` 发送 2 个 `HEAD` 请求预热 keep-alive 连接，并保留在同一个 HTTP client 的空闲连接池中供后续订单请求复用。到达起售时间后不再额外检测票档状态，而是直接调用订单准备、订单创建和支付参数接口；运行中的接口错误会按 `pollIntervalMillis` 继续重试，成功后进入 `waiting_payment`。
+下发任务。行为由 `taskMode` 决定：
+
+- `rush`：后端会先按任务的 `timeSyncStrategy` 同步时间，并写入 `timeOffsetMillis` 与 `timeSyncedAt`；随后启动内置任务运行器，使用“本地时间 + offset”等待票档起售时间。距离起售不足 30 秒时会向 `https://show.bilibili.com` 发送 2 个 `HEAD` 请求预热 keep-alive 连接，并保留在同一个 HTTP client 的空闲连接池中供后续订单请求复用。到达起售时间后不再额外检测票档状态，而是直接调用订单准备、订单创建和支付参数接口。
+- `restock`：后端不会等待开票、不会进行时间同步和预热，而是立即进入 `running`，按 `pollIntervalMillis` 轮询票档 `clickable`；`clickable=true` 后复用订单准备、订单创建和支付参数接口。`durationMode=limited` 时超过 `endAt` 会停止检测，`durationMode=unlimited` 时持续检测直到用户停止、删除或下单成功。
+
+运行中的接口错误会按 `pollIntervalMillis` 继续重试，成功后进入 `waiting_payment`。
 
 响应：
 

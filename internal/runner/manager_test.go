@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -384,6 +385,190 @@ func TestRunnerRetriesPayParamErrorsWithoutRecreatingOrder(t *testing.T) {
 	}
 }
 
+func TestRestockModeChecksTicketStatusBeforeOrderFlow(t *testing.T) {
+	var statusCalls atomic.Int32
+	var prepareCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			statusCalls.Add(1)
+			writeRunnerJSON(t, w, ticketDetailPayload(true))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			prepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-1", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-1"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRestockTask(t, model.DurationModeUnlimited, "")
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{
+		err: errors.New("restock mode should not sync time"),
+	})
+	dispatched, err := manager.Dispatch(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if dispatched.Status != "running" {
+		t.Fatalf("dispatched status = %q, want running", dispatched.Status)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-1" {
+		t.Fatalf("OrderID = %q, want ORDER-1", updated.OrderID)
+	}
+	if statusCalls.Load() == 0 {
+		t.Fatal("ticket status was not checked")
+	}
+	if prepareCalls.Load() == 0 {
+		t.Fatal("order flow was not started")
+	}
+	if updated.TimeSyncedAt != "" || updated.TimeOffsetMillis != 0 {
+		t.Fatalf("restock mode should not sync time: %#v", updated)
+	}
+}
+
+func TestRestockModeDoesNotCreateOrderWhenTicketUnavailable(t *testing.T) {
+	var statusCalls atomic.Int32
+	var prepareCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			statusCalls.Add(1)
+			writeRunnerJSON(t, w, ticketDetailPayload(false))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			prepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRestockTask(t, model.DurationModeUnlimited, "")
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	updated := waitForTaskCondition(t, taskStore, task.ID, func(task model.Task) bool {
+		return statusCalls.Load() >= 2 && task.Status == "running" && task.LastCheckedAt != ""
+	})
+	if updated.Status != "running" {
+		t.Fatalf("Status = %q, want running", updated.Status)
+	}
+	if prepareCalls.Load() != 0 {
+		t.Fatalf("prepare calls = %d, want 0", prepareCalls.Load())
+	}
+	manager.Cancel(task.ID)
+}
+
+func TestRestockModeLogsRepeatedStatusChecks(t *testing.T) {
+	var statusCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			statusCalls.Add(1)
+			writeRunnerJSON(t, w, ticketDetailPayload(false))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRestockTask(t, model.DurationModeUnlimited, "")
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	defer manager.Cancel(task.ID)
+
+	expectedMessage := restockStatusMessage()
+	first := waitForTaskCondition(t, taskStore, task.ID, func(task model.Task) bool {
+		return task.LastMessage == expectedMessage && task.LastCheckedAt != ""
+	})
+	firstCheckedAt := first.LastCheckedAt
+
+	updated := waitForTaskCondition(t, taskStore, task.ID, func(task model.Task) bool {
+		return statusCalls.Load() >= 3 &&
+			task.LastMessage == expectedMessage &&
+			task.LastCheckedAt != "" &&
+			task.LastCheckedAt != firstCheckedAt
+	})
+	if updated.LastMessage != expectedMessage {
+		t.Fatalf("LastMessage = %q, want %q", updated.LastMessage, expectedMessage)
+	}
+
+	logs, err := taskStore.ListTaskLogs(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("ListTaskLogs: %v", err)
+	}
+	statusLogCount := 0
+	for _, log := range logs {
+		if log.Message == expectedMessage {
+			statusLogCount++
+		}
+	}
+	if statusLogCount < 2 {
+		t.Fatalf("status log count = %d, want at least 2", statusLogCount)
+	}
+}
+
+func TestRestockLimitedModeStopsAtEndTime(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			writeRunnerJSON(t, w, ticketDetailPayload(false))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRestockTask(t, model.DurationModeLimited, time.Now().Add(120*time.Millisecond).Format(time.RFC3339))
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	updated := waitForTaskStatus(t, taskStore, task.ID, "failed")
+	if updated.LastMessage != "已超过任务结束时间，停止检测。" {
+		t.Fatalf("LastMessage = %q", updated.LastMessage)
+	}
+}
+
+func TestRestockUnlimitedModeAllowsEmptyEndTime(t *testing.T) {
+	taskStore, task := createRestockTask(t, model.DurationModeUnlimited, "")
+	defer taskStore.Close()
+
+	if err := validateTask(task); err != nil {
+		t.Fatalf("validateTask returned error: %v", err)
+	}
+}
+
 func createRunnableTask(t *testing.T) (*store.Store, model.Task) {
 	t.Helper()
 	return createRunnableTaskAt(t, time.Now().Add(-time.Second))
@@ -432,7 +617,59 @@ func createRunnableTaskAt(t *testing.T, saleStart time.Time) (*store.Store, mode
 	return taskStore, task
 }
 
+func createRestockTask(t *testing.T, durationMode string, endAt string) (*store.Store, model.Task) {
+	t.Helper()
+
+	taskStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	account, err := taskStore.CreateAccountWithStatus(context.Background(), model.AccountInput{
+		Name:   "测试账号",
+		Cookie: "SESSDATA=test",
+	}, "logged_in")
+	if err != nil {
+		taskStore.Close()
+		t.Fatalf("CreateAccountWithStatus: %v", err)
+	}
+	task, err := taskStore.CreateTask(context.Background(), model.TaskInput{
+		Name:               "回流捡漏任务",
+		AccountID:          account.ID,
+		ProjectID:          1001701,
+		ProjectName:        "测试项目",
+		ScreenID:           2001,
+		SKUID:              3001,
+		SessionName:        "晚场",
+		TicketLevel:        "VIP",
+		TicketDisplay:      "晚场 - VIP",
+		TicketPrice:        68000,
+		SaleStatus:         "暂时售罄",
+		TaskMode:           model.TaskModeRestock,
+		DurationMode:       durationMode,
+		OrderType:          1,
+		BuyerInfo:          []model.TicketBuyer{{ID: 7, Name: "张三", PersonalID: "110101199001010000", Tel: "13800000000"}},
+		Buyer:              "张三",
+		Tel:                "13800000000",
+		DeliverInfo:        &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000", FullAddress: "上海市测试路 1 号"},
+		EndAt:              endAt,
+		PollIntervalMillis: 30,
+	})
+	if err != nil {
+		taskStore.Close()
+		t.Fatalf("CreateTask: %v", err)
+	}
+	return taskStore, task
+}
+
 func waitForTaskStatus(t *testing.T, taskStore *store.Store, taskID int64, status string) model.Task {
+	t.Helper()
+
+	return waitForTaskCondition(t, taskStore, taskID, func(task model.Task) bool {
+		return task.Status == status
+	})
+}
+
+func waitForTaskCondition(t *testing.T, taskStore *store.Store, taskID int64, condition func(model.Task) bool) model.Task {
 	t.Helper()
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -441,13 +678,13 @@ func waitForTaskStatus(t *testing.T, taskStore *store.Store, taskID int64, statu
 		if err != nil {
 			t.Fatalf("GetTask: %v", err)
 		}
-		if task.Status == status {
+		if condition(task) {
 			return task
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	task, _ := taskStore.GetTask(context.Background(), taskID)
-	t.Fatalf("task status = %q, want %q; message=%q", task.Status, status, task.LastMessage)
+	t.Fatalf("task condition not met; status=%q message=%q", task.Status, task.LastMessage)
 	return model.Task{}
 }
 

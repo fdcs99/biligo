@@ -76,9 +76,11 @@ func (m *Manager) Dispatch(ctx context.Context, taskID int64) (model.Task, error
 		return model.Task{}, errors.New("账号未保存 Cookie")
 	}
 
-	task, err = m.syncTaskTime(ctx, task)
-	if err != nil {
-		return model.Task{}, err
+	if model.NormalizeTaskMode(task.TaskMode) == model.TaskModeRush {
+		task, err = m.syncTaskTime(ctx, task)
+		if err != nil {
+			return model.Task{}, err
+		}
 	}
 
 	m.mu.Lock()
@@ -90,9 +92,15 @@ func (m *Manager) Dispatch(ctx context.Context, taskID int64) (model.Task, error
 	m.running[taskID] = cancel
 	m.mu.Unlock()
 
+	status := "waiting_start"
+	message := "任务已下发，等待票档起售时间。"
+	if model.NormalizeTaskMode(task.TaskMode) == model.TaskModeRestock {
+		status = "running"
+		message = "回流捡漏任务已下发，开始检测票档状态。"
+	}
 	task, log, err := m.store.SetTaskRuntime(ctx, taskID, model.TaskRuntimeUpdate{
-		Status:      "waiting_start",
-		LastMessage: "任务已下发，等待票档起售时间。",
+		Status:      status,
+		LastMessage: message,
 	}, "info")
 	if err != nil {
 		m.remove(taskID)
@@ -142,6 +150,14 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 	if err != nil {
 		return
 	}
+	if model.NormalizeTaskMode(task.TaskMode) == model.TaskModeRestock {
+		m.runRestock(ctx, taskID, cookie, task)
+		return
+	}
+	m.runRush(ctx, taskID, cookie, task)
+}
+
+func (m *Manager) runRush(ctx context.Context, taskID int64, cookie string, task model.Task) {
 	saleStart, err := parseTaskTime(task.SaleStart)
 	if err != nil {
 		m.setRuntime(taskID, "failed", "无法解析票档起售时间："+err.Error(), "error")
@@ -163,11 +179,35 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 		interval = time.Second
 	}
 
+	deadlineExceeded := func() bool {
+		return nowWithOffset(timeOffset).After(endAt)
+	}
+	m.runOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded)
+}
+
+func (m *Manager) runRestock(ctx context.Context, taskID int64, cookie string, task model.Task) {
+	interval := time.Duration(task.PollIntervalMillis) * time.Millisecond
+	if interval <= 0 {
+		interval = time.Second
+	}
+
+	var deadlineExceeded func() bool
+	if model.NormalizeDurationMode(task.DurationMode) == model.DurationModeLimited {
+		endAt, err := parseTaskTime(task.EndAt)
+		if err != nil {
+			m.setRuntime(taskID, "failed", "回流捡漏有限模式需要设置合法截止时间："+err.Error(), "error")
+			return
+		}
+		deadlineExceeded = func() bool {
+			return time.Now().After(endAt)
+		}
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if nowWithOffset(timeOffset).After(endAt) {
+		if deadlineExceeded != nil && deadlineExceeded() {
 			m.setRuntime(taskID, "failed", "已超过任务结束时间，停止检测。", "warn")
 			return
 		}
@@ -176,12 +216,50 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 		if err != nil {
 			return
 		}
-		checkedAt := time.Now().Format(time.RFC3339)
+		checkedAt := checkedAtText()
+
+		_, available, err := m.ticket.CheckTicketStatus(ctx, latestTask, cookie)
+		if err != nil {
+			message := formatRetryMessage("票档状态检测失败：" + err.Error())
+			m.setRuntimeWithCheckedAt(taskID, "running", message, "warn", checkedAt)
+			if !m.wait(ctx, interval) {
+				return
+			}
+			continue
+		}
+
+		if available {
+			m.setRuntimeWithCheckedAt(taskID, "running", "检测到票档可购买，开始准备订单。", "info", checkedAt)
+			m.runOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded)
+			return
+		}
+		m.setRuntimeWithCheckedAt(taskID, "running", "票档暂不可购买，继续检测", "info", checkedAt)
+		if !m.wait(ctx, interval) {
+			return
+		}
+	}
+}
+
+func (m *Manager) runOrderFlow(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool) bool {
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		if deadlineExceeded != nil && deadlineExceeded() {
+			m.setRuntime(taskID, "failed", "已超过任务结束时间，停止检测。", "warn")
+			return false
+		}
+
+		latestTask, err := m.store.GetTask(context.Background(), taskID)
+		if err != nil {
+			return false
+		}
+		checkedAt := checkedAtText()
 
 		prepared, err := m.ticket.PrepareOrder(ctx, latestTask, cookie)
 		if err != nil {
 			if !m.retryRunError(ctx, taskID, "订单准备失败："+err.Error(), checkedAt, interval) {
-				return
+				return false
 			}
 			continue
 		}
@@ -189,29 +267,29 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 		if err != nil {
 			if result.Code == 100079 {
 				m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
-				return
+				return false
 			}
 			if result.Code == 100034 && result.PayMoney > 0 {
 				m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
 			}
 			if !m.retryRunError(ctx, taskID, "创建订单失败："+err.Error(), checkedAt, interval) {
-				return
+				return false
 			}
 			continue
 		}
 		if result.Code == 100079 {
 			m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
-			return
+			return false
 		}
 		if result.OrderID == "" {
 			if !m.retryRunError(ctx, taskID, "订单接口返回成功，但未返回订单 ID", checkedAt, interval) {
-				return
+				return false
 			}
 			continue
 		}
-		payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, endAt, timeOffset)
+		payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded)
 		if !ok {
-			return
+			return false
 		}
 		task, log, err := m.store.SetTaskRuntime(context.Background(), taskID, model.TaskRuntimeUpdate{
 			Status:                "waiting_payment",
@@ -219,12 +297,12 @@ func (m *Manager) run(ctx context.Context, taskID int64, cookie string) {
 			OrderID:               result.OrderID,
 			PaymentURL:            payParam.CodeURL,
 			PaymentQRImageDataURL: payParam.QRImageDataURL,
-			LastCheckedAt:         time.Now().Format(time.RFC3339),
+			LastCheckedAt:         checkedAtText(),
 		}, "info")
 		if err == nil {
 			m.publishTaskAndLog(task, log)
 		}
-		return
+		return true
 	}
 }
 
@@ -244,12 +322,12 @@ func (m *Manager) retryRunError(ctx context.Context, taskID int64, message strin
 	return m.wait(ctx, interval)
 }
 
-func (m *Manager) waitForPayParam(ctx context.Context, taskID int64, orderID string, cookie string, interval time.Duration, endAt time.Time, timeOffset time.Duration) (biliticket.PayParamResult, bool) {
+func (m *Manager) waitForPayParam(ctx context.Context, taskID int64, orderID string, cookie string, interval time.Duration, deadlineExceeded func() bool) (biliticket.PayParamResult, bool) {
 	for {
 		if ctx.Err() != nil {
 			return biliticket.PayParamResult{}, false
 		}
-		if nowWithOffset(timeOffset).After(endAt) {
+		if deadlineExceeded != nil && deadlineExceeded() {
 			m.setRuntime(taskID, "failed", "已超过任务结束时间，停止获取支付参数。", "warn")
 			return biliticket.PayParamResult{}, false
 		}
@@ -257,10 +335,14 @@ func (m *Manager) waitForPayParam(ctx context.Context, taskID int64, orderID str
 		if err == nil {
 			return payParam, true
 		}
-		if !m.retryRunError(ctx, taskID, "订单创建成功，但获取支付二维码失败："+err.Error(), time.Now().Format(time.RFC3339), interval) {
+		if !m.retryRunError(ctx, taskID, "订单创建成功，但获取支付二维码失败："+err.Error(), checkedAtText(), interval) {
 			return biliticket.PayParamResult{}, false
 		}
 	}
+}
+
+func checkedAtText() string {
+	return time.Now().Format(time.RFC3339Nano)
 }
 
 func formatRetryMessage(message string) string {
@@ -422,8 +504,15 @@ func validateTask(task model.Task) error {
 	if task.ProjectID <= 0 || task.ScreenID <= 0 || task.SKUID <= 0 {
 		return errors.New("请先获取票务信息并选择票信息")
 	}
-	if strings.TrimSpace(task.SaleStart) == "" {
+	taskMode := model.NormalizeTaskMode(task.TaskMode)
+	durationMode := model.NormalizeDurationMode(task.DurationMode)
+	if taskMode == model.TaskModeRush && strings.TrimSpace(task.SaleStart) == "" {
 		return errors.New("票档缺少起售时间")
+	}
+	if taskMode == model.TaskModeRestock && durationMode == model.DurationModeLimited {
+		if _, err := parseTaskTime(task.EndAt); err != nil {
+			return errors.New("回流捡漏有限模式需要设置合法截止时间")
+		}
 	}
 	if len(task.BuyerInfo) == 0 {
 		return errors.New("请至少选择一位实名购票人")

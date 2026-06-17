@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/fdcs99/biligo/internal/model"
 )
 
 func TestExtractProjectIDAcceptsSharedMallLinkWithTrailingPlus(t *testing.T) {
@@ -261,11 +263,71 @@ func TestFetchPurchaseContextMapsProjectBuyersAndAddresses(t *testing.T) {
 	if len(project.TicketOptions) != 1 || project.TicketOptions[0].SKUID != 3001 {
 		t.Fatalf("unexpected ticket options: %#v", project.TicketOptions)
 	}
+	if !project.TicketOptions[0].Clickable {
+		t.Fatalf("ticket clickable = false, want true")
+	}
 	if len(project.Buyers) != 1 || project.Buyers[0].Name != "张三" {
 		t.Fatalf("unexpected buyers: %#v", project.Buyers)
 	}
 	if len(project.Addresses) != 1 || project.Addresses[0].FullAddress != "上海市上海市徐汇区测试路 1 号" {
 		t.Fatalf("unexpected addresses: %#v", project.Addresses)
+	}
+}
+
+func TestCheckTicketStatusUsesClickableFlag(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			writeJSON(t, w, map[string]any{
+				"code":    0,
+				"success": true,
+				"data": map[string]any{
+					"projectId":   1001701,
+					"projectName": "测试项目",
+					"screenList": []map[string]any{
+						{
+							"id":   2001,
+							"name": "晚场",
+							"ticket_list": []map[string]any{
+								{
+									"id":               3001,
+									"desc":             "VIP",
+									"price":            68000,
+									"sale_start":       "2026-06-13 20:00:00",
+									"sale_flag_number": 2,
+									"clickable":        false,
+								},
+							},
+						},
+					},
+				},
+			})
+		case "/api/ticket/linkgoods/list":
+			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithBaseURL(server.Client(), server.URL)
+	option, available, err := client.CheckTicketStatus(context.Background(), model.Task{
+		ProjectID: 1001701,
+		ScreenID:  2001,
+		SKUID:     3001,
+	}, "SESSDATA=test")
+	if err != nil {
+		t.Fatalf("CheckTicketStatus: %v", err)
+	}
+	if option.SaleStatus != "预售" {
+		t.Fatalf("SaleStatus = %q, want 预售", option.SaleStatus)
+	}
+	if option.Clickable {
+		t.Fatal("Clickable = true, want false")
+	}
+	if available {
+		t.Fatal("available = true, want false when clickable is false")
 	}
 }
 

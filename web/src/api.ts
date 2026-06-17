@@ -145,6 +145,7 @@ export interface TicketOption {
   saleStart: string
   isHotProject: boolean
   linkId?: number
+  clickable: boolean
 }
 
 export interface TicketBuyer {
@@ -184,6 +185,8 @@ export interface Task {
   saleStatus: string
   linkId: number
   isHotProject: boolean
+  taskMode: string
+  durationMode: string
   orderType: number
   payMoney: number
   buyerInfo: TicketBuyer[]
@@ -223,6 +226,8 @@ export interface TaskInput {
   saleStatus: string
   linkId: number
   isHotProject: boolean
+  taskMode: string
+  durationMode: string
   orderType: number
   payMoney: number
   buyerInfo: TicketBuyer[]

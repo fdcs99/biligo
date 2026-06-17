@@ -338,6 +338,12 @@ p {
   line-height: 1.5;
 }
 
+.field-hint {
+  color: #77736c;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .ticket-detail-grid {
   display: grid;
   gap: 8px;

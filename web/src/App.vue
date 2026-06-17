@@ -113,6 +113,8 @@ const taskForm = reactive<TaskInput>({
   saleStatus: '',
   linkId: 0,
   isHotProject: false,
+  taskMode: 'rush',
+  durationMode: 'limited',
   orderType: 1,
   payMoney: 0,
   buyerInfo: [],
@@ -152,13 +154,16 @@ const selectedTicketOption = computed(() =>
   ticketOptions.value.find((ticket) => ticket.value === selectedTicketValue.value),
 )
 const hasFetchedTicketInfo = computed(() => Boolean(fetchedTicketProject.value?.projectId && ticketOptions.value.length > 0))
+const isRestockTaskForm = computed(() => taskForm.taskMode === 'restock')
+const isRestockUnlimitedTaskForm = computed(() => taskForm.taskMode === 'restock' && taskForm.durationMode === 'unlimited')
 const canSaveTask = computed(
   () =>
     taskForm.name.trim() !== '' &&
     taskForm.accountId > 0 &&
     taskForm.ticketDisplay.trim() !== '' &&
     taskForm.skuId > 0 &&
-    taskForm.saleStart.trim() !== '' &&
+    (isRestockTaskForm.value || taskForm.saleStart.trim() !== '') &&
+    (!isRestockTaskForm.value || taskForm.durationMode !== 'limited' || taskForm.endAt.trim() !== '') &&
     taskForm.buyerInfo.length > 0 &&
     Boolean(taskForm.deliverInfo?.id) &&
     taskForm.buyer.trim() !== '' &&
@@ -538,6 +543,8 @@ function resetTaskForm() {
     saleStatus: '',
     linkId: 0,
     isHotProject: false,
+    taskMode: 'rush',
+    durationMode: 'limited',
     orderType: 1,
     payMoney: 0,
     buyerInfo: [],
@@ -570,6 +577,8 @@ function editTask(task: Task) {
     saleStatus: task.saleStatus,
     linkId: task.linkId,
     isHotProject: task.isHotProject,
+    taskMode: task.taskMode || 'rush',
+    durationMode: task.durationMode || 'limited',
     orderType: task.orderType,
     payMoney: task.payMoney,
     buyerInfo: task.buyerInfo ?? [],
@@ -592,9 +601,16 @@ async function saveTask() {
     if (!taskForm.ticketDisplay || taskForm.skuId <= 0) {
       throw new Error('请先获取票务信息并选择票信息')
     }
+    if (taskForm.taskMode === 'rush' && !taskForm.saleStart.trim()) {
+      throw new Error('抢票模式需要票档起售时间')
+    }
+    if (taskForm.taskMode === 'restock' && taskForm.durationMode === 'limited' && !taskForm.endAt.trim()) {
+      throw new Error('回流捡漏有限模式需要设置截止时间')
+    }
     if (taskForm.buyerInfo.length === 0 || !taskForm.deliverInfo?.id) {
       throw new Error('请先选择购票人和收货地址')
     }
+    normalizeTaskModeFields()
     taskForm.quantity = taskForm.buyerInfo.length
     taskForm.payMoney = taskForm.ticketPrice * taskForm.quantity
     if (editingTaskId.value) {
@@ -636,6 +652,30 @@ function clearSelectedTicketFields() {
     payMoney: 0,
     endAt: '',
   })
+}
+
+function normalizeTaskModeFields() {
+  if (taskForm.taskMode !== 'restock') {
+    taskForm.taskMode = 'rush'
+    taskForm.durationMode = 'limited'
+    return
+  }
+  if (taskForm.durationMode !== 'unlimited') {
+    taskForm.durationMode = 'limited'
+    return
+  }
+  taskForm.endAt = ''
+}
+
+function handleTaskModeChange() {
+  normalizeTaskModeFields()
+  if (taskForm.taskMode === 'rush' && selectedTicketOption.value && !taskForm.endAt) {
+    taskForm.endAt = defaultEndAtFromSaleStart(selectedTicketOption.value.saleStart)
+  }
+}
+
+function handleDurationModeChange() {
+  normalizeTaskModeFields()
 }
 
 function clearPurchaseFields() {
@@ -904,6 +944,7 @@ function restoreTicketSelectionFromTask(task: Task) {
         saleStart: task.saleStart,
         isHotProject: task.isHotProject,
         linkId: task.linkId,
+        clickable: false,
       }
     : null
   ticketOptions.value = restored ? [restored] : []
@@ -1062,6 +1103,20 @@ function stopClock() {
 }
 
 function countdownText(task: Task) {
+  if (task.taskMode === 'restock') {
+    if (task.durationMode === 'unlimited') {
+      return '无限检测'
+    }
+    const endAt = parseTaskTime(task.endAt)
+    if (!endAt) {
+      return '未设置截止时间'
+    }
+    const remaining = endAt.getTime() - nowMs.value
+    if (remaining <= 0) {
+      return '已到截止时间'
+    }
+    return `剩余${formatDuration(remaining)}`
+  }
   const target = parseTaskTime(task.saleStart)
   if (!target) {
     return '-'
@@ -1070,7 +1125,14 @@ function countdownText(task: Task) {
   if (remaining <= 0) {
     return '已到起售时间'
   }
-  const totalSeconds = Math.ceil(remaining / 1000)
+  return formatDuration(remaining)
+}
+
+function formatDuration(durationMs: number) {
+  if (durationMs < 0) {
+    durationMs = 0
+  }
+  const totalSeconds = Math.ceil(durationMs / 1000)
   const hours = Math.floor(totalSeconds / 3600)
   const minutes = Math.floor((totalSeconds % 3600) / 60)
   const seconds = totalSeconds % 60
@@ -1098,11 +1160,38 @@ function timeSyncStrategyLabel(strategy: string) {
 }
 
 function timeSyncSummary(task: Task) {
+  if (task.taskMode === 'restock') {
+    return task.durationMode === 'unlimited' ? '回流捡漏 · 无限模式' : `回流捡漏 · 截止 ${task.endAt || '-'}`
+  }
   if (!task.timeSyncedAt) {
     return `${timeSyncStrategyLabel(task.timeSyncStrategy)} · 未同步`
   }
   const offset = task.timeOffsetMillis || 0
   return `${timeSyncStrategyLabel(task.timeSyncStrategy)} · offset ${offset >= 0 ? '+' : ''}${offset}ms`
+}
+
+function lastCheckedSummary(task: Pick<Task, 'lastCheckedAt'>) {
+  return `最近检测：${lastCheckedText(task.lastCheckedAt)}`
+}
+
+function lastCheckedText(value: string) {
+  if (!value) {
+    return '-'
+  }
+  const checkedAt = parseTaskTime(value)
+  if (!checkedAt) {
+    return value
+  }
+  const milliseconds = String(checkedAt.getMilliseconds()).padStart(3, '0')
+  return `${checkedAt.toLocaleString('zh-CN', { hour12: false })}.${milliseconds}`
+}
+
+function taskModeLabel(task: Pick<Task, 'taskMode'>) {
+  return task.taskMode === 'restock' ? '回流捡漏' : '抢票'
+}
+
+function taskModeTagType(task: Pick<Task, 'taskMode'>) {
+  return task.taskMode === 'restock' ? 'warning' : 'info'
 }
 
 async function copyPaymentUrl(task: Task) {
@@ -1431,6 +1520,18 @@ onUnmounted(() => {
           <el-form-item required label="任务名称">
             <el-input v-model="taskForm.name" placeholder="例如：上海场 2 张" clearable />
           </el-form-item>
+          <el-form-item required label="任务模式">
+            <el-radio-group v-model="taskForm.taskMode" @change="handleTaskModeChange">
+              <el-radio-button label="rush">抢票模式</el-radio-button>
+              <el-radio-button label="restock">回流捡漏模式</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="isRestockTaskForm" required label="回流捡漏时长">
+            <el-radio-group v-model="taskForm.durationMode" @change="handleDurationModeChange">
+              <el-radio-button label="limited">有限模式</el-radio-button>
+              <el-radio-button label="unlimited">无限模式</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
           <el-form-item required label="抢票项目 ID">
             <div class="input-action-row">
               <el-autocomplete
@@ -1481,6 +1582,7 @@ onUnmounted(() => {
             <span>{{ selectedTicketOption.ticketLevel }}</span>
             <span>{{ selectedTicketOption.priceText }}</span>
             <span>{{ selectedTicketOption.saleStatus }}</span>
+            <span>clickable: {{ selectedTicketOption.clickable ? 'true' : 'false' }}</span>
           </div>
           <el-form-item required label="账号">
             <div class="input-action-row">
@@ -1547,7 +1649,7 @@ onUnmounted(() => {
                 <el-input-number v-model="taskForm.pollIntervalMillis" :min="1" controls-position="right" class="full-input" />
               </el-form-item>
             </el-col>
-            <el-col :xs="24" :sm="12">
+            <el-col v-if="!isRestockTaskForm" :xs="24" :sm="12">
               <el-form-item label="时间同步策略">
                 <el-select v-model="taskForm.timeSyncStrategy">
                   <el-option value="bilibili" label="哔哩哔哩时间" />
@@ -1556,7 +1658,7 @@ onUnmounted(() => {
               </el-form-item>
             </el-col>
           </el-row>
-          <el-alert type="info" show-icon :closable="false" class="form-tip-alert">
+          <el-alert v-if="!isRestockTaskForm" type="info" show-icon :closable="false" class="form-tip-alert">
             <template #title>
               <strong>时间同步提示</strong>
             </template>
@@ -1568,9 +1670,9 @@ onUnmounted(() => {
           <el-form-item label="订单类型">
             <el-input :model-value="String(taskForm.orderType)" disabled />
           </el-form-item>
-          <el-row :gutter="12">
+          <el-row v-if="!isRestockUnlimitedTaskForm" :gutter="12">
             <el-col :xs="24" :sm="12">
-              <el-form-item label="结束时间">
+              <el-form-item :required="isRestockTaskForm" :label="isRestockTaskForm ? '截止时间' : '结束时间'">
                 <el-date-picker
                   v-model="taskForm.endAt"
                   type="datetime"
@@ -1581,13 +1683,15 @@ onUnmounted(() => {
                 />
               </el-form-item>
             </el-col>
-            <el-col :xs="24" :sm="12">
+            <el-col v-if="!isRestockTaskForm" :xs="24" :sm="12">
               <el-form-item required label="起售时间">
                 <el-input :model-value="taskForm.saleStart" disabled />
               </el-form-item>
             </el-col>
           </el-row>
-          <p class="field-hint">不填写则默认开票后 10 分钟停止。</p>
+          <p v-if="!isRestockTaskForm" class="field-hint">不填写则默认开票后 10 分钟停止。</p>
+          <p v-else-if="taskForm.durationMode === 'limited'" class="field-hint">有限模式达到截止时间后停止检测。</p>
+          <p v-else class="field-hint">无限模式不会按时间自动停止，请在任务管理中手动停止。</p>
           <el-button native-type="submit" type="primary" :icon="Document" :disabled="!canSaveTask" :loading="loading">
             保存任务
           </el-button>
@@ -1605,8 +1709,10 @@ onUnmounted(() => {
                 <p>{{ task.projectName || '未选择项目' }} · {{ task.accountName || '未选择账号' }}</p>
                 <small>{{ taskTicketSummary(task) }}</small>
                 <small>{{ taskBuyerSummary(task) }}</small>
+                <small>{{ lastCheckedSummary(task) }}</small>
               </div>
               <div class="actions">
+                <el-tag :type="taskModeTagType(task)">{{ taskModeLabel(task) }}</el-tag>
                 <el-tag :type="taskStatusTagType(task.status)">{{ statusLabel(task.status) }}</el-tag>
                 <el-button :icon="Edit" @click="editTask(task)">编辑</el-button>
                 <el-button type="primary" :icon="VideoPlay" @click="dispatchTask(task.id)">下发</el-button>
@@ -1627,8 +1733,10 @@ onUnmounted(() => {
                 <p>{{ task.projectName || '未选择项目' }} · {{ task.accountName || '未选择账号' }}</p>
                 <small>{{ taskTicketSummary(task) }}</small>
                 <small>{{ taskBuyerSummary(task) }}</small>
+                <small>{{ lastCheckedSummary(task) }}</small>
               </div>
               <div class="actions">
+                <el-tag :type="taskModeTagType(task)">{{ taskModeLabel(task) }}</el-tag>
                 <el-tag :type="taskStatusTagType(task.status)">{{ statusLabel(task.status) }}</el-tag>
                 <el-button :icon="Edit" disabled title="请先停止任务后再编辑">编辑</el-button>
                 <el-button :icon="SwitchButton" @click="stopTask(task.id)">停止</el-button>
@@ -1650,6 +1758,7 @@ onUnmounted(() => {
             <el-table-column label="任务" min-width="220">
               <template #default="{ row }">
                 <strong>{{ row.name }}</strong>
+                <small>模式：{{ taskModeLabel(row) }}</small>
                 <small>{{ taskBuyerSummary(row) }}</small>
               </template>
             </el-table-column>
@@ -1666,6 +1775,11 @@ onUnmounted(() => {
               </template>
             </el-table-column>
             <el-table-column prop="lastMessage" label="最近消息" min-width="220" show-overflow-tooltip />
+            <el-table-column label="最近检测" min-width="170">
+              <template #default="{ row }">
+                <span>{{ lastCheckedText(row.lastCheckedAt) }}</span>
+              </template>
+            </el-table-column>
             <el-table-column label="支付" min-width="130">
               <template #default="{ row }">
                 <div v-if="row.status === 'waiting_payment' && row.paymentUrl" class="payment-cell">
@@ -1693,9 +1807,11 @@ onUnmounted(() => {
                 <p>{{ task.accountName || '-' }} · {{ countdownText(task) }}</p>
                 <small>{{ taskBuyerSummary(task) }}</small>
                 <small>{{ timeSyncSummary(task) }}</small>
+                <small>{{ lastCheckedSummary(task) }}</small>
                 <small>{{ task.lastMessage || '-' }}</small>
               </div>
               <div class="actions">
+                <el-tag :type="taskModeTagType(task)">{{ taskModeLabel(task) }}</el-tag>
                 <el-tag :type="taskStatusTagType(task.status)">{{ statusLabel(task.status) }}</el-tag>
                 <el-button :icon="View" @click="selectTaskLog(task)">日志</el-button>
                 <el-button type="primary" :icon="VideoPlay" @click="startTask(task.id)">启动</el-button>

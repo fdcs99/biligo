@@ -734,6 +734,7 @@ func buildTicketOptions(payload projectPayload, screens []map[string]any) []mode
 			ticketLevel := stringValue(ticket["desc"])
 			price := int64Value(ticket["price"]) + expressFee
 			saleStatus := formatSaleStatus(ticket)
+			clickable := boolValue(ticket["clickable"])
 			saleStart := stringValue(ticket["sale_start"])
 			linkID := int64Value(screen["link_id"])
 			value := fmt.Sprintf("%d:%d:%d:%d", currentProjectID, screenID, skuID, linkID)
@@ -757,6 +758,7 @@ func buildTicketOptions(payload projectPayload, screens []map[string]any) []mode
 				SaleStart:    saleStart,
 				IsHotProject: payload.HotProject,
 				LinkID:       linkID,
+				Clickable:    clickable,
 			})
 		}
 	}
@@ -770,12 +772,7 @@ func buildTicketOptions(payload projectPayload, screens []map[string]any) []mode
 }
 
 func isTicketOptionAvailable(option model.TicketOption) bool {
-	switch strings.TrimSpace(option.SaleStatus) {
-	case "可购买", "库存紧张", "预售":
-		return true
-	default:
-		return false
-	}
+	return option.Clickable
 }
 
 func normalizeBuyer(raw map[string]any) model.TicketBuyer {

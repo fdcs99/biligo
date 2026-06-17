@@ -5,6 +5,12 @@ import "strings"
 const (
 	TimeSyncStrategyBilibili = "bilibili"
 	TimeSyncStrategyLocal    = "local"
+
+	TaskModeRush    = "rush"
+	TaskModeRestock = "restock"
+
+	DurationModeLimited   = "limited"
+	DurationModeUnlimited = "unlimited"
 )
 
 type Health struct {
@@ -160,6 +166,7 @@ type TicketOption struct {
 	SaleStart    string `json:"saleStart"`
 	IsHotProject bool   `json:"isHotProject"`
 	LinkID       int64  `json:"linkId,omitempty"`
+	Clickable    bool   `json:"clickable"`
 }
 
 type TicketBuyer struct {
@@ -199,6 +206,8 @@ type Task struct {
 	SaleStatus            string         `json:"saleStatus"`
 	LinkID                int64          `json:"linkId"`
 	IsHotProject          bool           `json:"isHotProject"`
+	TaskMode              string         `json:"taskMode"`
+	DurationMode          string         `json:"durationMode"`
 	OrderType             int            `json:"orderType"`
 	PayMoney              int64          `json:"payMoney"`
 	BuyerInfo             []TicketBuyer  `json:"buyerInfo"`
@@ -238,6 +247,8 @@ type TaskInput struct {
 	SaleStatus         string         `json:"saleStatus"`
 	LinkID             int64          `json:"linkId"`
 	IsHotProject       bool           `json:"isHotProject"`
+	TaskMode           string         `json:"taskMode"`
+	DurationMode       string         `json:"durationMode"`
 	OrderType          int            `json:"orderType"`
 	PayMoney           int64          `json:"payMoney"`
 	BuyerInfo          []TicketBuyer  `json:"buyerInfo"`
@@ -280,5 +291,23 @@ func NormalizeTimeSyncStrategy(strategy string) string {
 		return TimeSyncStrategyLocal
 	default:
 		return TimeSyncStrategyBilibili
+	}
+}
+
+func NormalizeTaskMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case TaskModeRestock:
+		return TaskModeRestock
+	default:
+		return TaskModeRush
+	}
+}
+
+func NormalizeDurationMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case DurationModeUnlimited:
+		return DurationModeUnlimited
+	default:
+		return DurationModeLimited
 	}
 }

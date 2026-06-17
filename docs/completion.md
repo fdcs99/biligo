@@ -8,6 +8,97 @@
 - 每条记录包含：日期、类型、摘要、主要变更、验收情况、遗留事项。
 - 只记录已经完成或明确决策的内容，不记录未确认的想法。
 
+## 2026-06-17 票档 clickable 解析与回流判断
+
+类型：票务状态修正
+
+摘要：票档信息接入 `clickable` 字段，回流捡漏模式改为以 `clickable` 判断是否有票。
+
+主要变更：
+
+- 解析 `mall-search-items/items_detail/info` 返回的每个票档 `clickable` 参数，并写入 `TicketOption.clickable`。
+- 前端票档类型补充 `clickable` 字段，选中票档时展示该参数。
+- 回流捡漏检测票档状态时，以 `clickable == true` 作为进入下单流程的依据，不再依赖 `saleStatus` 文案。
+- 更新 `docs/api.md`，记录票档 `clickable` 字段和回流判断规则。
+- 新增测试覆盖 `sale_flag_number` 显示为预售但 `clickable=false` 时不应判定为可购买。
+
+验收情况：
+
+- 已通过 `go test ./internal/biliticket ./internal/runner ./internal/store`。
+- 已通过 `go test ./...`。
+- 已通过 `pnpm --dir web build`。
+- 已通过 `git diff --check`。
+
+
+## 2026-06-17 全任务最近检测时间补齐
+
+类型：任务状态增强
+
+摘要：所有任务运行状态更新都会补齐 `lastCheckedAt`，确保任务页面“最近检测”对抢票和回流任务都可见。
+
+主要变更：
+
+- `SetTaskRuntime` 在未显式传入 `LastCheckedAt` 时自动写入当前时间。
+- 任务下发、停止、等待起售、预热、失败、重复订单、抢票重试和回流检测等运行状态都会刷新最近检测时间。
+- 新增存储测试，验证运行状态更新会自动补齐 RFC3339Nano 格式的 `LastCheckedAt`。
+
+验收情况：
+
+- 已通过 `go test ./internal/store ./internal/runner`。
+- 已通过 `go test ./...`。
+- 已通过 `pnpm --dir web build`。
+- 已通过 `git diff --check`。
+
+遗留事项：
+
+- 暂无。
+
+
+## 2026-06-15 回流检测时间展示
+
+类型：体验优化
+
+摘要：任务页面展示最近检测时间
+
+主要变更：
+
+- Web 端在待下发任务、已下发任务、任务管理桌面表格和手机任务卡片中展示 `lastCheckedAt`。
+- 最近检测时间使用本地时间并显示到毫秒，便于观察毫秒级轮询下的刷新。
+- 回流捡漏检测票档状态时，若状态文案与上一轮一致，只更新 `lastCheckedAt`，保持最近消息不变。
+
+验收情况：
+
+- 已通过 `go test ./internal/runner`。
+- 已通过 `pnpm --dir web build`。
+- 已通过 `go test ./...`。
+- 已通过 `git diff --check`。
+
+## 2026-06-15 回流捡漏模式
+
+类型：任务模式增强
+
+摘要：任务配置新增回流捡漏模式，可跳过开票等待并直接检测票档状态，有票后进入订单流程。
+
+主要变更：
+
+- 任务模型新增 `taskMode` 与 `durationMode`，默认分别为 `rush` 和 `limited`。
+- 抢票模式保留原有时间同步、等待起售、连接预热和直接下单流程。
+- 回流捡漏模式下发后立即进入运行态，按重试间隔检测票档状态；检测到可购买后复用订单准备、创建订单和支付参数流程。
+- 回流捡漏支持有限模式和无限模式；有限模式需要截止时间，无限模式不需要。
+- Web 任务配置新增模式选择、有限/无限选择、模式标签和对应时间展示。
+- 更新 `docs/api.md`，记录新增字段和两种下发模式。
+
+验收情况：
+
+- 已通过 `go test ./internal/store ./internal/runner`。
+- 已通过 `go test ./...`。
+- 已通过 `pnpm build`。
+- 已通过 `git diff --check`。
+
+遗留事项：
+
+- 暂无。
+
 ## 2026-06-15 GitHub Actions 自动检查与发布构建
 
 类型：工程自动化
