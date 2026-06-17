@@ -91,6 +91,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			is_hot_project INTEGER NOT NULL DEFAULT 0,
 			task_mode TEXT NOT NULL DEFAULT 'rush',
 			duration_mode TEXT NOT NULL DEFAULT 'limited',
+			selected_tickets TEXT NOT NULL DEFAULT '[]',
 			order_type INTEGER NOT NULL DEFAULT 1,
 			pay_money INTEGER NOT NULL DEFAULT 0,
 			buyer_info TEXT NOT NULL DEFAULT '[]',
@@ -328,9 +329,9 @@ func (s *Store) ListTasks(ctx context.Context) ([]model.Task, error) {
 			t.id, t.name, t.account_id, COALESCE(a.name, ''),
 			t.project_id, t.project_name, t.screen_id, t.sku_id,
 			t.session_name, t.ticket_level, t.ticket_display, t.ticket_price,
-			t.sale_start, t.sale_status, t.link_id, t.is_hot_project,
-			t.task_mode, t.duration_mode,
-			t.order_type, t.pay_money, t.buyer_info, t.buyer, t.tel, t.deliver_info, t.phone,
+				t.sale_start, t.sale_status, t.link_id, t.is_hot_project,
+				t.task_mode, t.duration_mode, t.selected_tickets,
+				t.order_type, t.pay_money, t.buyer_info, t.buyer, t.tel, t.deliver_info, t.phone,
 			t.order_id, t.payment_url, t.payment_qr_image_data_url, t.last_checked_at,
 			t.time_sync_strategy, t.time_offset_ms, t.time_synced_at,
 			t.quantity, t.start_at, t.end_at,
@@ -363,6 +364,10 @@ func (s *Store) CreateTask(ctx context.Context, input model.TaskInput) (model.Ta
 	if err != nil {
 		return model.Task{}, err
 	}
+	selectedTickets, err := marshalJSON(input.SelectedTickets, "[]")
+	if err != nil {
+		return model.Task{}, err
+	}
 	deliverInfo, err := marshalJSON(input.DeliverInfo, "{}")
 	if err != nil {
 		return model.Task{}, err
@@ -370,16 +375,16 @@ func (s *Store) CreateTask(ctx context.Context, input model.TaskInput) (model.Ta
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO tasks (
 			name, account_id, project_id, project_name, screen_id, sku_id,
-			session_name, ticket_level, ticket_display, ticket_price,
-			sale_start, sale_status, link_id, is_hot_project,
-			task_mode, duration_mode,
-			order_type, pay_money, buyer_info, buyer, tel, deliver_info, phone,
+				session_name, ticket_level, ticket_display, ticket_price,
+				sale_start, sale_status, link_id, is_hot_project,
+				task_mode, duration_mode, selected_tickets,
+				order_type, pay_money, buyer_info, buyer, tel, deliver_info, phone,
 			time_sync_strategy,
 			quantity, start_at, end_at, poll_interval_ms,
 			status, last_message, created_at, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', '任务已创建，等待下发。', ?, ?)
-	`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, now, now)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', '任务已创建，等待下发。', ?, ?)
+		`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, now, now)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -401,9 +406,9 @@ func (s *Store) GetTask(ctx context.Context, id int64) (model.Task, error) {
 			t.id, t.name, t.account_id, COALESCE(a.name, ''),
 			t.project_id, t.project_name, t.screen_id, t.sku_id,
 			t.session_name, t.ticket_level, t.ticket_display, t.ticket_price,
-			t.sale_start, t.sale_status, t.link_id, t.is_hot_project,
-			t.task_mode, t.duration_mode,
-			t.order_type, t.pay_money, t.buyer_info, t.buyer, t.tel, t.deliver_info, t.phone,
+				t.sale_start, t.sale_status, t.link_id, t.is_hot_project,
+				t.task_mode, t.duration_mode, t.selected_tickets,
+				t.order_type, t.pay_money, t.buyer_info, t.buyer, t.tel, t.deliver_info, t.phone,
 			t.order_id, t.payment_url, t.payment_qr_image_data_url, t.last_checked_at,
 			t.time_sync_strategy, t.time_offset_ms, t.time_synced_at,
 			t.quantity, t.start_at, t.end_at,
@@ -423,6 +428,10 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, input model.TaskInput)
 	if err != nil {
 		return model.Task{}, err
 	}
+	selectedTickets, err := marshalJSON(input.SelectedTickets, "[]")
+	if err != nil {
+		return model.Task{}, err
+	}
 	deliverInfo, err := marshalJSON(input.DeliverInfo, "{}")
 	if err != nil {
 		return model.Task{}, err
@@ -432,12 +441,12 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, input model.TaskInput)
 		SET name = ?, account_id = ?, project_id = ?, project_name = ?, screen_id = ?, sku_id = ?,
 			session_name = ?, ticket_level = ?, ticket_display = ?, ticket_price = ?,
 			sale_start = ?, sale_status = ?, link_id = ?, is_hot_project = ?,
-			task_mode = ?, duration_mode = ?,
+			task_mode = ?, duration_mode = ?, selected_tickets = ?,
 			order_type = ?, pay_money = ?, buyer_info = ?, buyer = ?, tel = ?, deliver_info = ?, phone = ?,
 			time_sync_strategy = ?,
 			quantity = ?, start_at = ?, end_at = ?, poll_interval_ms = ?, updated_at = ?
 		WHERE id = ?
-	`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, now, id)
+	`, strings.TrimSpace(input.Name), input.AccountID, input.ProjectID, strings.TrimSpace(input.ProjectName), input.ScreenID, input.SKUID, strings.TrimSpace(input.SessionName), strings.TrimSpace(input.TicketLevel), strings.TrimSpace(input.TicketDisplay), input.TicketPrice, strings.TrimSpace(input.SaleStart), strings.TrimSpace(input.SaleStatus), input.LinkID, boolToInt(input.IsHotProject), input.TaskMode, input.DurationMode, selectedTickets, input.OrderType, input.PayMoney, buyerInfo, strings.TrimSpace(input.Buyer), strings.TrimSpace(input.Tel), deliverInfo, strings.TrimSpace(input.Phone), input.TimeSyncStrategy, input.Quantity, strings.TrimSpace(input.StartAt), strings.TrimSpace(input.EndAt), input.PollIntervalMillis, now, id)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -594,6 +603,53 @@ func (s *Store) SetTaskPayMoney(ctx context.Context, id int64, payMoney int64, m
 	return task, log, nil
 }
 
+func (s *Store) SetTaskMatchedTicket(ctx context.Context, id int64, ticket model.TicketOption, quantity int, message string, checkedAt string) (model.Task, model.TaskLog, error) {
+	now := nowText()
+	if quantity <= 0 {
+		quantity = 1
+	}
+	payMoney := ticket.Price * int64(quantity)
+	if checkedAt == "" {
+		checkedAt = time.Now().Format(time.RFC3339Nano)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tasks
+		SET project_id = ?,
+			screen_id = ?,
+			sku_id = ?,
+			session_name = ?,
+			ticket_level = ?,
+			ticket_display = ?,
+			ticket_price = ?,
+			sale_start = ?,
+			sale_status = ?,
+			link_id = ?,
+			is_hot_project = ?,
+			pay_money = ?,
+			last_message = COALESCE(NULLIF(?, ''), last_message),
+			last_checked_at = ?,
+			updated_at = ?
+		WHERE id = ?
+	`, ticket.ProjectID, ticket.ScreenID, ticket.SKUID, strings.TrimSpace(ticket.ScreenName), strings.TrimSpace(ticket.TicketLevel), strings.TrimSpace(ticket.Display), ticket.Price, strings.TrimSpace(ticket.SaleStart), strings.TrimSpace(ticket.SaleStatus), ticket.LinkID, boolToInt(ticket.IsHotProject), payMoney, strings.TrimSpace(message), checkedAt, now, id)
+	if err != nil {
+		return model.Task{}, model.TaskLog{}, err
+	}
+
+	var log model.TaskLog
+	if strings.TrimSpace(message) != "" {
+		log, err = s.AddTaskLog(ctx, id, "info", message)
+		if err != nil {
+			return model.Task{}, model.TaskLog{}, err
+		}
+	}
+
+	task, err := s.GetTask(ctx, id)
+	if err != nil {
+		return model.Task{}, model.TaskLog{}, err
+	}
+	return task, log, nil
+}
+
 func (s *Store) AddTaskLog(ctx context.Context, taskID int64, level string, message string) (model.TaskLog, error) {
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO task_logs (task_id, level, message, created_at)
@@ -677,6 +733,7 @@ type taskScanner interface {
 func scanTask(scanner taskScanner, task *model.Task) error {
 	var isHotProject int
 	var buyerInfo string
+	var selectedTickets string
 	var deliverInfo string
 	if err := scanner.Scan(
 		&task.ID,
@@ -697,6 +754,7 @@ func scanTask(scanner taskScanner, task *model.Task) error {
 		&isHotProject,
 		&task.TaskMode,
 		&task.DurationMode,
+		&selectedTickets,
 		&task.OrderType,
 		&task.PayMoney,
 		&buyerInfo,
@@ -725,6 +783,9 @@ func scanTask(scanner taskScanner, task *model.Task) error {
 	task.IsHotProject = isHotProject != 0
 	task.TaskMode = model.NormalizeTaskMode(task.TaskMode)
 	task.DurationMode = model.NormalizeDurationMode(task.DurationMode)
+	if err := unmarshalJSON(selectedTickets, &task.SelectedTickets); err != nil {
+		return err
+	}
 	if err := unmarshalJSON(buyerInfo, &task.BuyerInfo); err != nil {
 		return err
 	}

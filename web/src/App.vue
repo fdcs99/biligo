@@ -115,6 +115,7 @@ const taskForm = reactive<TaskInput>({
   isHotProject: false,
   taskMode: 'rush',
   durationMode: 'limited',
+  selectedTickets: [],
   orderType: 1,
   payMoney: 0,
   buyerInfo: [],
@@ -136,6 +137,7 @@ const ticketOptions = ref<TicketOption[]>([])
 const ticketBuyers = ref<TicketBuyer[]>([])
 const ticketAddresses = ref<TicketAddress[]>([])
 const selectedTicketValue = ref('')
+const selectedTicketValues = ref<string[]>([])
 const selectedBuyerIndexes = ref<number[]>([])
 const selectedAddressId = ref<number>(0)
 const nowMs = ref(Date.now())
@@ -153,6 +155,9 @@ const issuedTasks = computed(() => tasks.value.filter((task) => task.status !== 
 const selectedTicketOption = computed(() =>
   ticketOptions.value.find((ticket) => ticket.value === selectedTicketValue.value),
 )
+const selectedTicketOptions = computed(() =>
+  ticketOptions.value.filter((ticket) => selectedTicketValues.value.includes(ticket.value)),
+)
 const hasFetchedTicketInfo = computed(() => Boolean(fetchedTicketProject.value?.projectId && ticketOptions.value.length > 0))
 const isRestockTaskForm = computed(() => taskForm.taskMode === 'restock')
 const isRestockUnlimitedTaskForm = computed(() => taskForm.taskMode === 'restock' && taskForm.durationMode === 'unlimited')
@@ -160,8 +165,8 @@ const canSaveTask = computed(
   () =>
     taskForm.name.trim() !== '' &&
     taskForm.accountId > 0 &&
-    taskForm.ticketDisplay.trim() !== '' &&
-    taskForm.skuId > 0 &&
+    ((isRestockTaskForm.value && taskForm.selectedTickets.length > 0) ||
+      (!isRestockTaskForm.value && taskForm.ticketDisplay.trim() !== '' && taskForm.skuId > 0)) &&
     (isRestockTaskForm.value || taskForm.saleStart.trim() !== '') &&
     (!isRestockTaskForm.value || taskForm.durationMode !== 'limited' || taskForm.endAt.trim() !== '') &&
     taskForm.buyerInfo.length > 0 &&
@@ -545,6 +550,7 @@ function resetTaskForm() {
     isHotProject: false,
     taskMode: 'rush',
     durationMode: 'limited',
+    selectedTickets: [],
     orderType: 1,
     payMoney: 0,
     buyerInfo: [],
@@ -579,6 +585,7 @@ function editTask(task: Task) {
     isHotProject: task.isHotProject,
     taskMode: task.taskMode || 'rush',
     durationMode: task.durationMode || 'limited',
+    selectedTickets: task.selectedTickets ?? [],
     orderType: task.orderType,
     payMoney: task.payMoney,
     buyerInfo: task.buyerInfo ?? [],
@@ -598,8 +605,14 @@ function editTask(task: Task) {
 
 async function saveTask() {
   await run(async () => {
-    if (!taskForm.ticketDisplay || taskForm.skuId <= 0) {
+    if (taskForm.taskMode === 'restock') {
+      applySelectedRestockTickets()
+    }
+    if (taskForm.taskMode !== 'restock' && (!taskForm.ticketDisplay || taskForm.skuId <= 0)) {
       throw new Error('请先获取票务信息并选择票信息')
+    }
+    if (taskForm.taskMode === 'restock' && taskForm.selectedTickets.length === 0) {
+      throw new Error('回流蹲票模式请至少选择一个票种')
     }
     if (taskForm.taskMode === 'rush' && !taskForm.saleStart.trim()) {
       throw new Error('抢票模式需要票档起售时间')
@@ -631,6 +644,7 @@ function resetTicketProjectSelection() {
   ticketBuyers.value = []
   ticketAddresses.value = []
   selectedTicketValue.value = ''
+  selectedTicketValues.value = []
   selectedBuyerIndexes.value = []
   selectedAddressId.value = 0
 }
@@ -649,6 +663,7 @@ function clearSelectedTicketFields() {
     saleStatus: '',
     linkId: 0,
     isHotProject: false,
+    selectedTickets: [],
     payMoney: 0,
     endAt: '',
   })
@@ -658,8 +673,10 @@ function normalizeTaskModeFields() {
   if (taskForm.taskMode !== 'restock') {
     taskForm.taskMode = 'rush'
     taskForm.durationMode = 'limited'
+    taskForm.selectedTickets = selectedTicketOption.value ? [selectedTicketOption.value] : []
     return
   }
+  applySelectedRestockTickets()
   if (taskForm.durationMode !== 'unlimited') {
     taskForm.durationMode = 'limited'
     return
@@ -669,6 +686,10 @@ function normalizeTaskModeFields() {
 
 function handleTaskModeChange() {
   normalizeTaskModeFields()
+  if (taskForm.taskMode === 'restock' && selectedTicketValue.value && selectedTicketValues.value.length === 0) {
+    selectedTicketValues.value = [selectedTicketValue.value]
+    applySelectedRestockTickets()
+  }
   if (taskForm.taskMode === 'rush' && selectedTicketOption.value && !taskForm.endAt) {
     taskForm.endAt = defaultEndAtFromSaleStart(selectedTicketOption.value.saleStart)
   }
@@ -732,6 +753,7 @@ function applyTicketProjectHistory() {
   const history = ticketProjectHistories.value.find((item) => String(item.projectId) === raw)
   ticketOptions.value = []
   selectedTicketValue.value = ''
+  selectedTicketValues.value = []
   clearSelectedTicketFields()
   clearPurchaseFields()
   if (!history) {
@@ -764,6 +786,7 @@ async function fetchTicketProject() {
       throw new Error('请输入抢票项目 ID')
     }
     const previousTicketValue = selectedTicketValue.value
+    const previousTicketValues = [...selectedTicketValues.value]
     const project = await api.fetchTicketProject({
       projectInput,
       accountId: 0,
@@ -774,11 +797,15 @@ async function fetchTicketProject() {
     ticketBuyers.value = []
     ticketAddresses.value = []
     clearPurchaseFields()
-    if (previousTicketValue && ticketOptions.value.some((ticket) => ticket.value === previousTicketValue)) {
+    selectedTicketValues.value = previousTicketValues.filter((value) => ticketOptions.value.some((ticket) => ticket.value === value))
+    if (taskForm.taskMode === 'restock' && selectedTicketValues.value.length > 0) {
+      applySelectedRestockTickets()
+    } else if (previousTicketValue && ticketOptions.value.some((ticket) => ticket.value === previousTicketValue)) {
       selectedTicketValue.value = previousTicketValue
       selectTicketOption()
     } else {
       selectedTicketValue.value = ''
+      selectedTicketValues.value = []
       clearSelectedTicketFields()
     }
     ticketProjectHistories.value = await api.listTicketProjectHistory()
@@ -810,10 +837,10 @@ function applyTicketAccountContext(context: TicketAccountContext) {
 }
 
 function selectTicketOption() {
-  const ticket = selectedTicketOption.value
-  if (!ticket || !fetchedTicketProject.value) {
-    clearSelectedTicketFields()
-    return
+	const ticket = selectedTicketOption.value
+	if (!ticket || !fetchedTicketProject.value) {
+		clearSelectedTicketFields()
+		return
   }
   const defaultEndAt = defaultEndAtFromSaleStart(ticket.saleStart)
   Object.assign(taskForm, {
@@ -834,6 +861,43 @@ function selectTicketOption() {
   })
   if (!taskForm.name.trim()) {
     taskForm.name = [fetchedTicketProject.value.projectName, ticket.screenName, ticket.ticketLevel]
+      .filter(Boolean)
+	      .join(' ')
+	  }
+	}
+
+function selectRestockTickets() {
+  applySelectedRestockTickets()
+}
+
+function applySelectedRestockTickets() {
+  const tickets = selectedTicketOptions.value
+  taskForm.selectedTickets = tickets
+  if (tickets.length === 0) {
+    clearSelectedTicketFields()
+    return
+  }
+  if (!fetchedTicketProject.value) {
+    return
+  }
+  const primary = tickets[0]
+  Object.assign(taskForm, {
+    projectId: primary.projectId,
+    projectName: fetchedTicketProject.value.projectName,
+    screenId: primary.screenId,
+    skuId: primary.skuId,
+    sessionName: primary.screenName,
+    ticketLevel: primary.ticketLevel,
+    ticketDisplay: primary.display,
+    ticketPrice: primary.price,
+    saleStart: primary.saleStart,
+    saleStatus: primary.saleStatus,
+    linkId: primary.linkId ?? 0,
+    isHotProject: primary.isHotProject,
+    payMoney: primary.price * taskForm.buyerInfo.length,
+  })
+  if (!taskForm.name.trim()) {
+    taskForm.name = [fetchedTicketProject.value.projectName, '回流蹲票']
       .filter(Boolean)
       .join(' ')
   }
@@ -869,6 +933,14 @@ function taskBuyerSummary(task: Task) {
 }
 
 function taskTicketSummary(task: Task) {
+  const selectedTickets = task.selectedTickets ?? []
+  if (task.taskMode === 'restock' && selectedTickets.length > 0) {
+    const names = selectedTickets.map((ticket) => ticket.display || `${ticket.screenName || '-'} / ${ticket.ticketLevel || '-'}`)
+    const preview = names.slice(0, 2).join('、')
+    const suffix = names.length > 2 ? ` 等 ${names.length} 个` : `${names.length} 个`
+    const current = task.ticketDisplay ? `；当前：${task.ticketDisplay}` : ''
+    return `回流票种：${preview}（${suffix}）${current}`
+  }
   const display = task.ticketDisplay || `${task.sessionName || '-'} / ${task.ticketLevel || '-'}`
   return `${display} / ${task.quantity} 张`
 }
@@ -947,8 +1019,16 @@ function restoreTicketSelectionFromTask(task: Task) {
         clickable: false,
       }
     : null
-  ticketOptions.value = restored ? [restored] : []
-  selectedTicketValue.value = restored?.value ?? ''
+  const restoredSelectedTickets = task.selectedTickets ?? []
+  const restoredOptions = [...restoredSelectedTickets]
+  if (restored && !restoredOptions.some((ticket) => ticket.value === restored.value)) {
+    restoredOptions.unshift(restored)
+  }
+  ticketOptions.value = restoredOptions
+  selectedTicketValue.value = restored?.value ?? restoredOptions[0]?.value ?? ''
+  selectedTicketValues.value = task.taskMode === 'restock'
+    ? restoredSelectedTickets.map((ticket) => ticket.value)
+    : selectedTicketValue.value ? [selectedTicketValue.value] : []
   ticketBuyers.value = task.buyerInfo ?? []
   ticketAddresses.value = task.deliverInfo ? [task.deliverInfo] : []
   selectedBuyerIndexes.value = task.buyerInfo?.map((_, index) => index) ?? []
@@ -1566,7 +1646,7 @@ onUnmounted(() => {
               {{ fetchedTicketProject.startAt || '-' }} 至 {{ fetchedTicketProject.endAt || '-' }}
             </span>
           </div>
-          <el-form-item required label="票信息">
+          <el-form-item v-if="!isRestockTaskForm" required label="票信息">
             <el-select
               v-model="selectedTicketValue"
               :disabled="ticketOptions.length === 0"
@@ -1577,12 +1657,41 @@ onUnmounted(() => {
               <el-option v-for="ticket in ticketOptions" :key="ticket.value" :value="ticket.value" :label="ticket.display" />
             </el-select>
           </el-form-item>
-          <div v-if="selectedTicketOption" class="ticket-detail-grid">
+          <el-form-item v-else required label="回流票种">
+            <el-select
+              v-model="selectedTicketValues"
+              :disabled="ticketOptions.length === 0"
+              placeholder="选择一个或多个票种"
+              filterable
+              multiple
+              collapse-tags
+              collapse-tags-tooltip
+              @change="selectRestockTickets"
+            >
+              <el-option v-for="ticket in ticketOptions" :key="ticket.value" :value="ticket.value" :label="ticket.display" />
+            </el-select>
+          </el-form-item>
+          <el-alert
+            v-if="isRestockTaskForm"
+            type="info"
+            show-icon
+            :closable="false"
+            class="form-tip-alert"
+          >
+            <template #title>
+              若选择多个票种，则按每次检测中第一个可购买的票种下单。
+            </template>
+          </el-alert>
+          <div v-if="!isRestockTaskForm && selectedTicketOption" class="ticket-detail-grid">
             <span>{{ selectedTicketOption.screenName }}</span>
             <span>{{ selectedTicketOption.ticketLevel }}</span>
             <span>{{ selectedTicketOption.priceText }}</span>
             <span>{{ selectedTicketOption.saleStatus }}</span>
             <span>clickable: {{ selectedTicketOption.clickable ? 'true' : 'false' }}</span>
+          </div>
+          <div v-if="isRestockTaskForm && selectedTicketOptions.length > 0" class="ticket-detail-grid">
+            <span>已选 {{ selectedTicketOptions.length }} 个票种</span>
+            <span v-for="ticket in selectedTicketOptions" :key="ticket.value">{{ ticket.display }}</span>
           </div>
           <el-form-item required label="账号">
             <div class="input-action-row">

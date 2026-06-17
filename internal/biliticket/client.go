@@ -246,15 +246,37 @@ func (c *Client) CheckTicketStatus(ctx context.Context, task model.Task, cookie 
 		return model.TicketOption{}, false, err
 	}
 	for _, option := range project.TicketOptions {
-		if option.ProjectID != task.ProjectID || option.ScreenID != task.ScreenID || option.SKUID != task.SKUID {
-			continue
-		}
-		if task.LinkID > 0 && option.LinkID != task.LinkID {
+		if !ticketOptionMatchesTask(option, task) {
 			continue
 		}
 		return option, isTicketOptionAvailable(option), nil
 	}
 	return model.TicketOption{}, false, errors.New("未在最新票务信息中找到任务票档")
+}
+
+func (c *Client) CheckSelectedTicketsStatus(ctx context.Context, task model.Task, cookie string) (model.TicketOption, int, bool, error) {
+	project, err := c.FetchProject(ctx, strconv.FormatInt(task.ProjectID, 10), cookie)
+	if err != nil {
+		return model.TicketOption{}, 0, false, err
+	}
+	selected := selectedTicketSet(task.SelectedTickets)
+	if len(selected) == 0 {
+		return model.TicketOption{}, 0, false, errors.New("回流蹲票模式未选择票种")
+	}
+	checkedCount := 0
+	for _, option := range project.TicketOptions {
+		if _, ok := selected[ticketOptionKey(option)]; !ok {
+			continue
+		}
+		checkedCount++
+		if isTicketOptionAvailable(option) {
+			return option, checkedCount, true, nil
+		}
+	}
+	if checkedCount == 0 {
+		return model.TicketOption{}, 0, false, errors.New("未在最新票务信息中找到已选票种")
+	}
+	return model.TicketOption{}, checkedCount, false, nil
 }
 
 func (c *Client) WarmupShow(ctx context.Context, count int) error {
@@ -773,6 +795,32 @@ func buildTicketOptions(payload projectPayload, screens []map[string]any) []mode
 
 func isTicketOptionAvailable(option model.TicketOption) bool {
 	return option.Clickable
+}
+
+func ticketOptionMatchesTask(option model.TicketOption, task model.Task) bool {
+	if option.ProjectID != task.ProjectID || option.ScreenID != task.ScreenID || option.SKUID != task.SKUID {
+		return false
+	}
+	return task.LinkID <= 0 || option.LinkID == task.LinkID
+}
+
+func selectedTicketSet(tickets []model.TicketOption) map[string]struct{} {
+	result := make(map[string]struct{}, len(tickets))
+	for _, ticket := range tickets {
+		key := ticketOptionKey(ticket)
+		if key == "" {
+			continue
+		}
+		result[key] = struct{}{}
+	}
+	return result
+}
+
+func ticketOptionKey(ticket model.TicketOption) string {
+	if ticket.ProjectID <= 0 || ticket.ScreenID <= 0 || ticket.SKUID <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d:%d:%d", ticket.ProjectID, ticket.ScreenID, ticket.SKUID, ticket.LinkID)
 }
 
 func normalizeBuyer(raw map[string]any) model.TicketBuyer {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -57,6 +58,27 @@ func TestValidateTaskRequiresPurchaseConfig(t *testing.T) {
 	task.BuyerInfo = nil
 	if err := validateTask(task); err == nil {
 		t.Fatal("validateTask returned nil for missing buyer info")
+	}
+}
+
+func TestValidateRestockTaskRequiresSelectedTickets(t *testing.T) {
+	task := model.Task{
+		AccountID:       1,
+		ProjectID:       1001701,
+		TaskMode:        model.TaskModeRestock,
+		DurationMode:    model.DurationModeUnlimited,
+		BuyerInfo:       []model.TicketBuyer{{Name: "张三", PersonalID: "110101199001010000"}},
+		Buyer:           "张三",
+		Tel:             "13800000000",
+		DeliverInfo:     &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000"},
+		SelectedTickets: nil,
+	}
+	if err := validateTask(task); err == nil {
+		t.Fatal("validateTask returned nil for missing selected tickets")
+	}
+	task.SelectedTickets = []model.TicketOption{{ProjectID: 1001701, ScreenID: 2001, SKUID: 3001}}
+	if err := validateTask(task); err != nil {
+		t.Fatalf("validateTask returned error: %v", err)
 	}
 }
 
@@ -438,6 +460,107 @@ func TestRestockModeChecksTicketStatusBeforeOrderFlow(t *testing.T) {
 	}
 }
 
+func TestRestockModeUsesFirstClickableSelectedTicketFromLatestProjectOrder(t *testing.T) {
+	var preparedSKU atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			writeRunnerJSON(t, w, multiTicketDetailPayload(false, true, true))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			payload := decodeRunnerJSONBody(t, r)
+			preparedSKU.Store(int64FromBody(payload["sku_id"]))
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-1", "pay_money": 176000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-1"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRestockTaskWithTickets(t, model.DurationModeUnlimited, "", []model.TicketOption{
+		{Value: "1001701:2001:3003:0", Display: "晚场 - SVIP", ProjectID: 1001701, ScreenID: 2001, SKUID: 3003, ScreenName: "晚场", TicketLevel: "SVIP", Price: 128000},
+		{Value: "1001701:2001:3002:0", Display: "晚场 - VIP", ProjectID: 1001701, ScreenID: 2001, SKUID: 3002, ScreenName: "晚场", TicketLevel: "VIP", Price: 88000},
+	})
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if preparedSKU.Load() != 3002 {
+		t.Fatalf("prepared sku = %d, want 3002", preparedSKU.Load())
+	}
+	if updated.SKUID != 3002 || updated.TicketPrice != 88000 || updated.PayMoney != 88000 {
+		t.Fatalf("matched ticket not persisted: %#v", updated)
+	}
+}
+
+func TestRestockModeReturnsToTicketDetectionAfterOrderCreateFailure(t *testing.T) {
+	var infoCalls atomic.Int32
+	var createCalls atomic.Int32
+	var mu sync.Mutex
+	createSKUs := make([]int64, 0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			if infoCalls.Add(1) == 1 {
+				writeRunnerJSON(t, w, multiTicketDetailPayload(false, true, false))
+				return
+			}
+			writeRunnerJSON(t, w, multiTicketDetailPayload(false, false, true))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			payload := decodeRunnerJSONBody(t, r)
+			mu.Lock()
+			createSKUs = append(createSKUs, int64FromBody(payload["sku_id"]))
+			mu.Unlock()
+			if createCalls.Add(1) == 1 {
+				writeRunnerJSON(t, w, map[string]any{"code": 100009, "message": "stock not enough"})
+				return
+			}
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-2", "pay_money": 256000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-2"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRestockTaskWithTickets(t, model.DurationModeUnlimited, "", []model.TicketOption{
+		{Value: "1001701:2001:3002:0", Display: "晚场 - VIP", ProjectID: 1001701, ScreenID: 2001, SKUID: 3002, ScreenName: "晚场", TicketLevel: "VIP", Price: 88000},
+		{Value: "1001701:2001:3003:0", Display: "晚场 - SVIP", ProjectID: 1001701, ScreenID: 2001, SKUID: 3003, ScreenName: "晚场", TicketLevel: "SVIP", Price: 128000},
+	})
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-2" {
+		t.Fatalf("OrderID = %q, want ORDER-2", updated.OrderID)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(createSKUs) < 2 || createSKUs[0] != 3002 || createSKUs[1] != 3003 {
+		t.Fatalf("create skus = %#v, want [3002 3003]", createSKUs)
+	}
+}
+
 func TestRestockModeDoesNotCreateOrderWhenTicketUnavailable(t *testing.T) {
 	var statusCalls atomic.Int32
 	var prepareCalls atomic.Int32
@@ -502,7 +625,7 @@ func TestRestockModeLogsRepeatedStatusChecks(t *testing.T) {
 	}
 	defer manager.Cancel(task.ID)
 
-	expectedMessage := "票档暂不可购买，继续检测"
+	expectedMessage := "已检测 1 个已选票种，暂不可购买，继续检测。"
 	first := waitForTaskCondition(t, taskStore, task.ID, func(task model.Task) bool {
 		return task.LastMessage == expectedMessage && task.LastCheckedAt != ""
 	})
@@ -619,6 +742,13 @@ func createRunnableTaskAt(t *testing.T, saleStart time.Time) (*store.Store, mode
 
 func createRestockTask(t *testing.T, durationMode string, endAt string) (*store.Store, model.Task) {
 	t.Helper()
+	return createRestockTaskWithTickets(t, durationMode, endAt, []model.TicketOption{
+		{Value: "1001701:2001:3001:0", Display: "晚场 - VIP", ProjectID: 1001701, ScreenID: 2001, SKUID: 3001, ScreenName: "晚场", TicketLevel: "VIP", Price: 68000},
+	})
+}
+
+func createRestockTaskWithTickets(t *testing.T, durationMode string, endAt string, selectedTickets []model.TicketOption) (*store.Store, model.Task) {
+	t.Helper()
 
 	taskStore, err := store.Open(":memory:")
 	if err != nil {
@@ -646,6 +776,7 @@ func createRestockTask(t *testing.T, durationMode string, endAt string) (*store.
 		SaleStatus:         "暂时售罄",
 		TaskMode:           model.TaskModeRestock,
 		DurationMode:       durationMode,
+		SelectedTickets:    selectedTickets,
 		OrderType:          1,
 		BuyerInfo:          []model.TicketBuyer{{ID: 7, Name: "张三", PersonalID: "110101199001010000", Tel: "13800000000"}},
 		Buyer:              "张三",
@@ -718,6 +849,75 @@ func ticketDetailPayload(available bool) map[string]any {
 				"address_detail": "测试地址",
 			},
 		},
+	}
+}
+
+func multiTicketDetailPayload(standardAvailable bool, vipAvailable bool, svipAvailable bool) map[string]any {
+	return map[string]any{
+		"code":    0,
+		"success": true,
+		"data": map[string]any{
+			"projectId":   1001701,
+			"projectName": "测试项目",
+			"hotProject":  false,
+			"screenList": []map[string]any{
+				{
+					"id":          2001,
+					"name":        "晚场",
+					"start_time":  time.Now().Add(-time.Hour).Unix(),
+					"express_fee": 0,
+					"ticket_list": []map[string]any{
+						{
+							"id":         3001,
+							"desc":       "普通",
+							"price":      68000,
+							"sale_start": time.Now().Add(-time.Second).Format("2006-01-02 15:04:05"),
+							"clickable":  standardAvailable,
+						},
+						{
+							"id":         3002,
+							"desc":       "VIP",
+							"price":      88000,
+							"sale_start": time.Now().Add(-time.Second).Format("2006-01-02 15:04:05"),
+							"clickable":  vipAvailable,
+						},
+						{
+							"id":         3003,
+							"desc":       "SVIP",
+							"price":      128000,
+							"sale_start": time.Now().Add(-time.Second).Format("2006-01-02 15:04:05"),
+							"clickable":  svipAvailable,
+						},
+					},
+				},
+			},
+			"skuVenueInfo": map[string]any{
+				"name":           "测试场馆",
+				"address_detail": "测试地址",
+			},
+		},
+	}
+}
+
+func decodeRunnerJSONBody(t *testing.T, r *http.Request) map[string]any {
+	t.Helper()
+	var payload map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		t.Fatalf("Decode request body: %v", err)
+	}
+	return payload
+}
+
+func int64FromBody(value any) int64 {
+	switch typed := value.(type) {
+	case float64:
+		return int64(typed)
+	case int64:
+		return typed
+	case int:
+		return int64(typed)
+	default:
+		return 0
 	}
 }
 

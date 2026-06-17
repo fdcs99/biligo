@@ -208,6 +208,7 @@ type Task struct {
 	IsHotProject          bool           `json:"isHotProject"`
 	TaskMode              string         `json:"taskMode"`
 	DurationMode          string         `json:"durationMode"`
+	SelectedTickets       []TicketOption `json:"selectedTickets"`
 	OrderType             int            `json:"orderType"`
 	PayMoney              int64          `json:"payMoney"`
 	BuyerInfo             []TicketBuyer  `json:"buyerInfo"`
@@ -249,6 +250,7 @@ type TaskInput struct {
 	IsHotProject       bool           `json:"isHotProject"`
 	TaskMode           string         `json:"taskMode"`
 	DurationMode       string         `json:"durationMode"`
+	SelectedTickets    []TicketOption `json:"selectedTickets"`
 	OrderType          int            `json:"orderType"`
 	PayMoney           int64          `json:"payMoney"`
 	BuyerInfo          []TicketBuyer  `json:"buyerInfo"`

@@ -26,7 +26,10 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 		TicketLevel: "VIP",
 		TicketPrice: 68000,
 		SaleStart:   "2026-06-13 20:00:00",
-		OrderType:   1,
+		SelectedTickets: []model.TicketOption{
+			{Value: "1001701:2001:3001:0", ProjectID: 1001701, ScreenID: 2001, SKUID: 3001, TicketLevel: "VIP", Price: 68000, Clickable: true},
+		},
+		OrderType: 1,
 		BuyerInfo: []model.TicketBuyer{
 			{Name: "张三", PersonalID: "110101199001010000"},
 			{Name: "李四", PersonalID: "110101199001010001"},
@@ -65,6 +68,9 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	}
 	if task.DurationMode != model.DurationModeLimited {
 		t.Fatalf("DurationMode = %q, want %q", task.DurationMode, model.DurationModeLimited)
+	}
+	if len(task.SelectedTickets) != 1 || task.SelectedTickets[0].SKUID != 3001 || !task.SelectedTickets[0].Clickable {
+		t.Fatalf("SelectedTickets = %#v", task.SelectedTickets)
 	}
 	if task.PollIntervalMillis != 200 {
 		t.Fatalf("PollIntervalMillis = %d, want 200", task.PollIntervalMillis)
@@ -120,6 +126,7 @@ func TestMigrateCreatesCurrentTaskSchemaOnly(t *testing.T) {
 		"is_hot_project",
 		"task_mode",
 		"duration_mode",
+		"selected_tickets",
 		"order_type",
 		"pay_money",
 		"buyer_info",

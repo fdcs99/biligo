@@ -187,6 +187,7 @@ export interface Task {
   isHotProject: boolean
   taskMode: string
   durationMode: string
+  selectedTickets: TicketOption[]
   orderType: number
   payMoney: number
   buyerInfo: TicketBuyer[]
@@ -228,6 +229,7 @@ export interface TaskInput {
   isHotProject: boolean
   taskMode: string
   durationMode: string
+  selectedTickets: TicketOption[]
   orderType: number
   payMoney: number
   buyerInfo: TicketBuyer[]

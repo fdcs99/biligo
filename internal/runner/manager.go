@@ -218,9 +218,9 @@ func (m *Manager) runRestock(ctx context.Context, taskID int64, cookie string, t
 		}
 		checkedAt := checkedAtText()
 
-		_, available, err := m.ticket.CheckTicketStatus(ctx, latestTask, cookie)
+		option, checkedCount, available, err := m.ticket.CheckSelectedTicketsStatus(ctx, latestTask, cookie)
 		if err != nil {
-			message := formatRetryMessage("票档状态检测失败：" + err.Error())
+			message := formatRetryMessage("票种状态检测失败：" + err.Error())
 			m.setRuntimeWithCheckedAt(taskID, "running", message, "warn", checkedAt)
 			if !m.wait(ctx, interval) {
 				return
@@ -229,11 +229,22 @@ func (m *Manager) runRestock(ctx context.Context, taskID int64, cookie string, t
 		}
 
 		if available {
-			m.setRuntimeWithCheckedAt(taskID, "running", "检测到票档可购买，开始准备订单。", "info", checkedAt)
-			m.runOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded)
-			return
+			matchedTask, log, err := m.store.SetTaskMatchedTicket(context.Background(), taskID, option, latestTask.Quantity, "检测到票档可购买，开始准备订单。", checkedAt)
+			if err != nil {
+				m.setRuntimeWithCheckedAt(taskID, "running", formatRetryMessage("更新命中票种失败："+err.Error()), "warn", checkedAt)
+			} else {
+				m.publishTaskAndLog(matchedTask, log)
+				switch m.runOrderAttempt(ctx, taskID, cookie, deadlineExceeded) {
+				case orderAttemptFinished, orderAttemptStopped:
+					return
+				}
+			}
+			if !m.wait(ctx, interval) {
+				return
+			}
+			continue
 		}
-		m.setRuntimeWithCheckedAt(taskID, "running", "票档暂不可购买，继续检测", "info", checkedAt)
+		m.setRuntimeWithCheckedAt(taskID, "running", fmt.Sprintf("已检测 %d 个已选票种，暂不可购买，继续检测。", checkedCount), "info", checkedAt)
 		if !m.wait(ctx, interval) {
 			return
 		}
@@ -306,6 +317,77 @@ func (m *Manager) runOrderFlow(ctx context.Context, taskID int64, cookie string,
 	}
 }
 
+type orderAttemptResult int
+
+const (
+	orderAttemptRetryDetection orderAttemptResult = iota
+	orderAttemptFinished
+	orderAttemptStopped
+)
+
+func (m *Manager) runOrderAttempt(ctx context.Context, taskID int64, cookie string, deadlineExceeded func() bool) orderAttemptResult {
+	if ctx.Err() != nil {
+		return orderAttemptStopped
+	}
+	if deadlineExceeded != nil && deadlineExceeded() {
+		m.setRuntime(taskID, "failed", "已超过任务结束时间，停止检测。", "warn")
+		return orderAttemptStopped
+	}
+
+	latestTask, err := m.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return orderAttemptStopped
+	}
+	checkedAt := checkedAtText()
+
+	prepared, err := m.ticket.PrepareOrder(ctx, latestTask, cookie)
+	if err != nil {
+		m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage("订单准备失败："+err.Error()), "warn", checkedAt)
+		return orderAttemptRetryDetection
+	}
+	result, err := m.ticket.CreateOrder(ctx, latestTask, cookie, prepared)
+	if err != nil {
+		if result.Code == 100079 {
+			m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
+			return orderAttemptStopped
+		}
+		if result.Code == 100034 && result.PayMoney > 0 {
+			m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
+		}
+		m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage("创建订单失败："+err.Error()), "warn", checkedAt)
+		return orderAttemptRetryDetection
+	}
+	if result.Code == 100079 {
+		m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
+		return orderAttemptStopped
+	}
+	if result.OrderID == "" {
+		m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage("订单接口返回成功，但未返回订单 ID"), "warn", checkedAt)
+		return orderAttemptRetryDetection
+	}
+
+	interval := time.Duration(latestTask.PollIntervalMillis) * time.Millisecond
+	if interval <= 0 {
+		interval = time.Second
+	}
+	payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded)
+	if !ok {
+		return orderAttemptStopped
+	}
+	task, log, err := m.store.SetTaskRuntime(context.Background(), taskID, model.TaskRuntimeUpdate{
+		Status:                "waiting_payment",
+		LastMessage:           "订单创建成功，请尽快完成支付。",
+		OrderID:               result.OrderID,
+		PaymentURL:            payParam.CodeURL,
+		PaymentQRImageDataURL: payParam.QRImageDataURL,
+		LastCheckedAt:         checkedAtText(),
+	}, "info")
+	if err == nil {
+		m.publishTaskAndLog(task, log)
+	}
+	return orderAttemptFinished
+}
+
 func (m *Manager) applyPayMoneyUpdate(taskID int64, oldPayMoney int64, newPayMoney int64) {
 	if newPayMoney <= 0 || newPayMoney == oldPayMoney {
 		return
@@ -351,6 +433,14 @@ func formatRetryMessage(message string) string {
 		message = "运行异常"
 	}
 	return message + "，继续重试。"
+}
+
+func formatReturnToDetectMessage(message string) string {
+	message = strings.TrimRight(strings.TrimSpace(message), "。")
+	if message == "" {
+		message = "运行异常"
+	}
+	return message + "，返回票种检测。"
 }
 
 func (m *Manager) setRuntime(taskID int64, status string, message string, level string) {
@@ -501,11 +591,17 @@ func validateTask(task model.Task) error {
 	if task.AccountID <= 0 {
 		return errors.New("请先选择账号")
 	}
-	if task.ProjectID <= 0 || task.ScreenID <= 0 || task.SKUID <= 0 {
+	if task.ProjectID <= 0 {
 		return errors.New("请先获取票务信息并选择票信息")
 	}
 	taskMode := model.NormalizeTaskMode(task.TaskMode)
 	durationMode := model.NormalizeDurationMode(task.DurationMode)
+	if taskMode == model.TaskModeRestock && len(task.SelectedTickets) == 0 {
+		return errors.New("回流蹲票模式请至少选择一个票种")
+	}
+	if taskMode == model.TaskModeRush && (task.ScreenID <= 0 || task.SKUID <= 0) {
+		return errors.New("请先获取票务信息并选择票信息")
+	}
 	if taskMode == model.TaskModeRush && strings.TrimSpace(task.SaleStart) == "" {
 		return errors.New("票档缺少起售时间")
 	}
