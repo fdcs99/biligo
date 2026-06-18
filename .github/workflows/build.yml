@@ -24,6 +24,11 @@ jobs:
             goarch: amd64
             binary_ext: .exe
             archive_ext: zip
+          - goos: windows
+            os_name: windows
+            goarch: arm64
+            binary_ext: .exe
+            archive_ext: zip
           - goos: linux
             os_name: linux
             goarch: amd64
