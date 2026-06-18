@@ -487,6 +487,7 @@ func TestRunnerRetriesPrepareOrderErrors(t *testing.T) {
 }
 
 func TestRunnerRetriesDefaultBBRWarning(t *testing.T) {
+	var prepareCalls atomic.Int32
 	var createCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -496,9 +497,10 @@ func TestRunnerRetriesDefaultBBRWarning(t *testing.T) {
 		case "/api/ticket/linkgoods/list":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
 		case "/api/ticket/order/prepare":
+			prepareCalls.Add(1)
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
 		case "/api/ticket/order/createV2":
-			if createCalls.Add(1) == 1 {
+			if createCalls.Add(1) < createOrderAttemptsPerPrepare {
 				writeRunnerJSON(t, w, map[string]any{"code": 0, "message": "defaultBBR"})
 				return
 			}
@@ -523,8 +525,11 @@ func TestRunnerRetriesDefaultBBRWarning(t *testing.T) {
 	if updated.OrderID != "ORDER-1" {
 		t.Fatalf("OrderID = %q, want ORDER-1", updated.OrderID)
 	}
-	if createCalls.Load() < 2 {
-		t.Fatalf("create calls = %d, want at least 2", createCalls.Load())
+	if prepareCalls.Load() != 1 {
+		t.Fatalf("prepare calls = %d, want 1", prepareCalls.Load())
+	}
+	if createCalls.Load() != createOrderAttemptsPerPrepare {
+		t.Fatalf("create calls = %d, want %d", createCalls.Load(), createOrderAttemptsPerPrepare)
 	}
 }
 
@@ -594,6 +599,7 @@ func TestRunnerSwitchesProxyOnCreateV2RiskCodes(t *testing.T) {
 }
 
 func TestRunnerUpdatesPayMoneyForCreateV2PriceChange(t *testing.T) {
+	var prepareCalls atomic.Int32
 	var createCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -603,6 +609,7 @@ func TestRunnerUpdatesPayMoneyForCreateV2PriceChange(t *testing.T) {
 		case "/api/ticket/linkgoods/list":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
 		case "/api/ticket/order/prepare":
+			prepareCalls.Add(1)
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
 		case "/api/ticket/order/createV2":
 			if createCalls.Add(1) == 1 {
@@ -636,8 +643,11 @@ func TestRunnerUpdatesPayMoneyForCreateV2PriceChange(t *testing.T) {
 	if updated.PayMoney != 69000 {
 		t.Fatalf("PayMoney = %d, want 69000", updated.PayMoney)
 	}
-	if createCalls.Load() < 2 {
-		t.Fatalf("create calls = %d, want at least 2", createCalls.Load())
+	if prepareCalls.Load() != 2 {
+		t.Fatalf("prepare calls = %d, want 2", prepareCalls.Load())
+	}
+	if createCalls.Load() != 2 {
+		t.Fatalf("create calls = %d, want 2", createCalls.Load())
 	}
 }
 
@@ -807,7 +817,7 @@ func TestRestockModeReturnsToTicketDetectionAfterOrderCreateFailure(t *testing.T
 			mu.Lock()
 			createSKUs = append(createSKUs, int64FromBody(payload["sku_id"]))
 			mu.Unlock()
-			if createCalls.Add(1) == 1 {
+			if createCalls.Add(1) <= createOrderAttemptsPerPrepare {
 				writeRunnerJSON(t, w, map[string]any{"code": 100009, "message": "stock not enough"})
 				return
 			}
@@ -837,8 +847,74 @@ func TestRestockModeReturnsToTicketDetectionAfterOrderCreateFailure(t *testing.T
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(createSKUs) < 2 || createSKUs[0] != 3002 || createSKUs[1] != 3003 {
-		t.Fatalf("create skus = %#v, want [3002 3003]", createSKUs)
+	if len(createSKUs) < createOrderAttemptsPerPrepare+1 {
+		t.Fatalf("create skus = %#v, want at least %d calls", createSKUs, createOrderAttemptsPerPrepare+1)
+	}
+	for index := 0; index < createOrderAttemptsPerPrepare; index++ {
+		if createSKUs[index] != 3002 {
+			t.Fatalf("create skus = %#v, want first %d calls use 3002", createSKUs, createOrderAttemptsPerPrepare)
+		}
+	}
+	if createSKUs[createOrderAttemptsPerPrepare] != 3003 {
+		t.Fatalf("create skus = %#v, want call %d use 3003", createSKUs, createOrderAttemptsPerPrepare+1)
+	}
+}
+
+func TestRestockModeRepreparesAfterCreateV2PriceChange(t *testing.T) {
+	var infoCalls atomic.Int32
+	var prepareCalls atomic.Int32
+	var createCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			infoCalls.Add(1)
+			writeRunnerJSON(t, w, ticketDetailPayload(true))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			prepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			if createCalls.Add(1) == 1 {
+				writeRunnerJSON(t, w, map[string]any{
+					"code": 100034,
+					"data": map[string]any{"pay_money": 69000},
+				})
+				return
+			}
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-RESTOCK-1", "pay_money": 69000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-RESTOCK-1"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRestockTask(t, model.DurationModeUnlimited, "")
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-RESTOCK-1" {
+		t.Fatalf("OrderID = %q, want ORDER-RESTOCK-1", updated.OrderID)
+	}
+	if updated.PayMoney != 69000 {
+		t.Fatalf("PayMoney = %d, want 69000", updated.PayMoney)
+	}
+	if infoCalls.Load() != 1 {
+		t.Fatalf("ticket info calls = %d, want 1", infoCalls.Load())
+	}
+	if prepareCalls.Load() != 2 {
+		t.Fatalf("prepare calls = %d, want 2", prepareCalls.Load())
+	}
+	if createCalls.Load() != 2 {
+		t.Fatalf("create calls = %d, want 2", createCalls.Load())
 	}
 }
 

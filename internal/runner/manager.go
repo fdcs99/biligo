@@ -35,11 +35,12 @@ type Manager struct {
 }
 
 const (
-	saleStartWaitTick           = time.Millisecond * 50 // 等待 50 ms
-	saleStartWaitReportInterval = time.Second
-	saleStartWarmupBefore       = 30 * time.Second
-	saleStartWarmupRequestCount = 5
-	defaultProxyAPIPullBefore   = 5 * time.Minute
+	saleStartWaitTick             = time.Millisecond * 50 // 等待 50 ms
+	saleStartWaitReportInterval   = time.Second
+	saleStartWarmupBefore         = 30 * time.Second
+	saleStartWarmupRequestCount   = 5
+	defaultProxyAPIPullBefore     = 5 * time.Minute
+	createOrderAttemptsPerPrepare = 4
 )
 
 var pullKuaidailiDPS = proxynet.PullKuaidailiDPS
@@ -391,6 +392,7 @@ func (m *Manager) runOrderFlow(ctx context.Context, taskID int64, cookie string,
 }
 
 func (m *Manager) runOrderFlowWithDeadline(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, beforeAttempt func(), deadlineStatus string, deadlineMessage string, deadlineLevel string, payParamDeadlineMessage string, proxyRuntime *taskProxyRuntime) bool {
+orderLoop:
 	for {
 		if ctx.Err() != nil {
 			return false
@@ -420,35 +422,60 @@ func (m *Manager) runOrderFlowWithDeadline(ctx context.Context, taskID int64, co
 			}
 			continue
 		}
-		result, err := client.CreateOrder(ctx, latestTask, cookie, prepared)
-		if err != nil {
+
+		var result biliticket.OrderCreateResult
+		var createErr error
+		createFailedMessage := ""
+		for createAttempt := 1; createAttempt <= createOrderAttemptsPerPrepare; createAttempt++ {
+			if ctx.Err() != nil {
+				return false
+			}
+			if deadlineExceeded != nil && deadlineExceeded() {
+				m.setRuntime(taskID, deadlineStatus, deadlineMessage, deadlineLevel)
+				return false
+			}
+
+			result, createErr = client.CreateOrder(ctx, latestTask, cookie, prepared)
+			if createErr != nil {
+				if result.Code == 100079 {
+					m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
+					return false
+				}
+				if result.Code == 100034 && result.PayMoney > 0 {
+					m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
+					continue orderLoop
+				}
+				if shouldSwitchProxyForCreateError(result, createErr) {
+					if m.switchProxy(ctx, taskID, proxyRuntime, "创建订单触发代理切换："+createErr.Error()) {
+						continue orderLoop
+					}
+					createFailedMessage = "创建订单失败：" + createErr.Error()
+					break
+				}
+				createFailedMessage = "创建订单失败：" + createErr.Error()
+				continue
+			}
 			if result.Code == 100079 {
 				m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
 				return false
 			}
-			if result.Code == 100034 && result.PayMoney > 0 {
-				m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
+			if result.OrderID == "" {
+				createFailedMessage = "订单接口返回成功，但未返回订单 ID"
+				continue
 			}
-			if shouldSwitchProxyForCreateError(result, err) {
-				if m.switchProxy(ctx, taskID, proxyRuntime, "创建订单触发代理切换："+err.Error()) {
-					continue
-				}
+
+			break
+		}
+		if createErr != nil || result.OrderID == "" {
+			if createFailedMessage == "" {
+				createFailedMessage = "创建订单失败：未知错误"
 			}
-			if !m.retryRunError(ctx, taskID, "创建订单失败："+err.Error(), checkedAt, interval) {
+			if !m.retryRunError(ctx, taskID, createFailedMessage, checkedAt, interval) {
 				return false
 			}
 			continue
 		}
-		if result.Code == 100079 {
-			m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
-			return false
-		}
-		if result.OrderID == "" {
-			if !m.retryRunError(ctx, taskID, "订单接口返回成功，但未返回订单 ID", checkedAt, interval) {
-				return false
-			}
-			continue
-		}
+
 		payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, deadlineStatus, payParamDeadlineMessage, deadlineLevel, proxyRuntime)
 		if !ok {
 			return false
@@ -478,68 +505,93 @@ const (
 )
 
 func (m *Manager) runOrderAttempt(ctx context.Context, taskID int64, cookie string, deadlineExceeded func() bool, proxyRuntime *taskProxyRuntime) orderAttemptResult {
-	if ctx.Err() != nil {
-		return orderAttemptStopped
-	}
-	if deadlineExceeded != nil && deadlineExceeded() {
-		m.setRuntime(taskID, "failed", "已超过任务结束时间，停止检测。", "warn")
-		return orderAttemptStopped
-	}
-
-	latestTask, err := m.store.GetTask(context.Background(), taskID)
-	if err != nil {
-		return orderAttemptStopped
-	}
-	checkedAt := checkedAtText()
-
-	client := m.ticketClient(proxyRuntime)
-	prepared, err := client.PrepareOrder(ctx, latestTask, cookie)
-	if err != nil {
-		m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage("订单准备失败："+err.Error()), "warn", checkedAt)
-		return orderAttemptRetryDetection
-	}
-	result, err := client.CreateOrder(ctx, latestTask, cookie, prepared)
-	if err != nil {
-		if result.Code == 100079 {
-			m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
+prepareLoop:
+	for {
+		if ctx.Err() != nil {
 			return orderAttemptStopped
 		}
-		if result.Code == 100034 && result.PayMoney > 0 {
-			m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
+		if deadlineExceeded != nil && deadlineExceeded() {
+			m.setRuntime(taskID, "failed", "已超过任务结束时间，停止检测。", "warn")
+			return orderAttemptStopped
 		}
-		m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage("创建订单失败："+err.Error()), "warn", checkedAt)
-		return orderAttemptRetryDetection
-	}
-	if result.Code == 100079 {
-		m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
-		return orderAttemptStopped
-	}
-	if result.OrderID == "" {
-		m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage("订单接口返回成功，但未返回订单 ID"), "warn", checkedAt)
-		return orderAttemptRetryDetection
-	}
 
-	interval := time.Duration(latestTask.PollIntervalMillis) * time.Millisecond
-	if interval <= 0 {
-		interval = time.Second
+		latestTask, err := m.store.GetTask(context.Background(), taskID)
+		if err != nil {
+			return orderAttemptStopped
+		}
+		checkedAt := checkedAtText()
+
+		client := m.ticketClient(proxyRuntime)
+		prepared, err := client.PrepareOrder(ctx, latestTask, cookie)
+		if err != nil {
+			m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage("订单准备失败："+err.Error()), "warn", checkedAt)
+			return orderAttemptRetryDetection
+		}
+
+		var result biliticket.OrderCreateResult
+		var createErr error
+		createFailedMessage := ""
+		for createAttempt := 1; createAttempt <= createOrderAttemptsPerPrepare; createAttempt++ {
+			if ctx.Err() != nil {
+				return orderAttemptStopped
+			}
+			if deadlineExceeded != nil && deadlineExceeded() {
+				m.setRuntime(taskID, "failed", "已超过任务结束时间，停止检测。", "warn")
+				return orderAttemptStopped
+			}
+
+			result, createErr = client.CreateOrder(ctx, latestTask, cookie, prepared)
+			if createErr != nil {
+				if result.Code == 100079 {
+					m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
+					return orderAttemptStopped
+				}
+				if result.Code == 100034 && result.PayMoney > 0 {
+					m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
+					continue prepareLoop
+				}
+				createFailedMessage = "创建订单失败：" + createErr.Error()
+				continue
+			}
+			if result.Code == 100079 {
+				m.setRuntime(taskID, "duplicate_order", "存在重复订单，已停止。", "warn")
+				return orderAttemptStopped
+			}
+			if result.OrderID == "" {
+				createFailedMessage = "订单接口返回成功，但未返回订单 ID"
+				continue
+			}
+
+			interval := time.Duration(latestTask.PollIntervalMillis) * time.Millisecond
+			if interval <= 0 {
+				interval = time.Second
+			}
+			payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, "failed", "已超过任务结束时间，停止获取支付参数。", "warn", proxyRuntime)
+			if !ok {
+				return orderAttemptStopped
+			}
+			task, log, err := m.store.SetTaskRuntime(context.Background(), taskID, model.TaskRuntimeUpdate{
+				Status:                "waiting_payment",
+				LastMessage:           "订单创建成功，请尽快完成支付。",
+				OrderID:               result.OrderID,
+				PaymentURL:            payParam.CodeURL,
+				PaymentQRImageDataURL: payParam.QRImageDataURL,
+				LastCheckedAt:         checkedAtText(),
+			}, "info")
+			if err == nil {
+				m.publishTaskAndLog(task, log)
+				m.notifyTaskSuccess(task)
+			}
+			return orderAttemptFinished
+		}
+		if createErr != nil || result.OrderID == "" {
+			if createFailedMessage == "" {
+				createFailedMessage = "创建订单失败：未知错误"
+			}
+			m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage(createFailedMessage), "warn", checkedAt)
+			return orderAttemptRetryDetection
+		}
 	}
-	payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, "failed", "已超过任务结束时间，停止获取支付参数。", "warn", proxyRuntime)
-	if !ok {
-		return orderAttemptStopped
-	}
-	task, log, err := m.store.SetTaskRuntime(context.Background(), taskID, model.TaskRuntimeUpdate{
-		Status:                "waiting_payment",
-		LastMessage:           "订单创建成功，请尽快完成支付。",
-		OrderID:               result.OrderID,
-		PaymentURL:            payParam.CodeURL,
-		PaymentQRImageDataURL: payParam.QRImageDataURL,
-		LastCheckedAt:         checkedAtText(),
-	}, "info")
-	if err == nil {
-		m.publishTaskAndLog(task, log)
-		m.notifyTaskSuccess(task)
-	}
-	return orderAttemptFinished
 }
 
 func (m *Manager) applyPayMoneyUpdate(taskID int64, oldPayMoney int64, newPayMoney int64) {
