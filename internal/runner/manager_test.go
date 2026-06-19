@@ -20,6 +20,7 @@ import (
 	"github.com/fdcs99/biligo/internal/model"
 	"github.com/fdcs99/biligo/internal/notify"
 	"github.com/fdcs99/biligo/internal/store"
+	"github.com/fdcs99/biligo/internal/tickettime"
 	"github.com/fdcs99/biligo/internal/timesync"
 )
 
@@ -1205,7 +1206,7 @@ func createRunnableTaskAt(t *testing.T, saleStart time.Time) (*store.Store, mode
 		TicketLevel:        "VIP",
 		TicketDisplay:      "晚场 - VIP",
 		TicketPrice:        68000,
-		SaleStart:          saleStart.Format("2006-01-02 15:04:05"),
+		SaleStart:          formatBusinessTaskTime(saleStart),
 		SaleStatus:         "未开始",
 		OrderType:          1,
 		BuyerInfo:          []model.TicketBuyer{{ID: 7, Name: "张三", PersonalID: "110101199001010000", Tel: "13800000000"}},
@@ -1376,7 +1377,7 @@ func createHybridTaskAt(t *testing.T, saleStart time.Time, rushDurationSeconds i
 		TicketLevel:         "VIP",
 		TicketDisplay:       "晚场 - VIP",
 		TicketPrice:         68000,
-		SaleStart:           saleStart.Format("2006-01-02 15:04:05"),
+		SaleStart:           formatBusinessTaskTime(saleStart),
 		SaleStatus:          "未开始",
 		TaskMode:            model.TaskModeHybrid,
 		DurationMode:        durationMode,
@@ -1445,6 +1446,10 @@ func waitForNotificationCalls(t *testing.T, sender *fakeRunnerNotificationSender
 	t.Fatalf("notification calls = %d, want %d", sender.calls.Load(), want)
 }
 
+func formatBusinessTaskTime(value time.Time) string {
+	return value.In(tickettime.Location()).Format("2006-01-02 15:04:05")
+}
+
 func ticketDetailPayload(available bool) map[string]any {
 	return map[string]any{
 		"code":    0,
@@ -1464,7 +1469,7 @@ func ticketDetailPayload(available bool) map[string]any {
 							"id":         3001,
 							"desc":       "VIP",
 							"price":      68000,
-							"sale_start": time.Now().Add(-time.Second).Format("2006-01-02 15:04:05"),
+							"sale_start": formatBusinessTaskTime(time.Now().Add(-time.Second)),
 							"clickable":  available,
 						},
 					},
@@ -1497,21 +1502,21 @@ func multiTicketDetailPayload(standardAvailable bool, vipAvailable bool, svipAva
 							"id":         3001,
 							"desc":       "普通",
 							"price":      68000,
-							"sale_start": time.Now().Add(-time.Second).Format("2006-01-02 15:04:05"),
+							"sale_start": formatBusinessTaskTime(time.Now().Add(-time.Second)),
 							"clickable":  standardAvailable,
 						},
 						{
 							"id":         3002,
 							"desc":       "VIP",
 							"price":      88000,
-							"sale_start": time.Now().Add(-time.Second).Format("2006-01-02 15:04:05"),
+							"sale_start": formatBusinessTaskTime(time.Now().Add(-time.Second)),
 							"clickable":  vipAvailable,
 						},
 						{
 							"id":         3003,
 							"desc":       "SVIP",
 							"price":      128000,
-							"sale_start": time.Now().Add(-time.Second).Format("2006-01-02 15:04:05"),
+							"sale_start": formatBusinessTaskTime(time.Now().Add(-time.Second)),
 							"clickable":  svipAvailable,
 						},
 					},
