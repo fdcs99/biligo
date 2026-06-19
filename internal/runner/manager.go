@@ -45,6 +45,7 @@ const (
 )
 
 var pullKuaidailiDPS = proxynet.PullKuaidailiDPS
+var noProxyCreate412RetryWait = 3 * time.Second
 
 func NewManager(store *store.Store, ticket *biliticket.Client, hub *events.Hub) *Manager {
 	return NewManagerWithTimeSync(store, ticket, hub, timesync.NewClient(nil))
@@ -427,6 +428,7 @@ orderLoop:
 		var result biliticket.OrderCreateResult
 		var createErr error
 		createFailedMessage := ""
+		createRetryInterval := interval
 		for createAttempt := 1; createAttempt <= createOrderAttemptsPerPrepare; createAttempt++ {
 			if ctx.Err() != nil {
 				return false
@@ -451,6 +453,7 @@ orderLoop:
 						continue orderLoop
 					}
 					createFailedMessage = "创建订单失败：" + createErr.Error()
+					createRetryInterval = createErrorRetryInterval(result, proxyRuntime, interval)
 					break
 				}
 				createFailedMessage = "创建订单失败：" + createErr.Error()
@@ -471,7 +474,7 @@ orderLoop:
 			if createFailedMessage == "" {
 				createFailedMessage = "创建订单失败：未知错误"
 			}
-			if !m.retryRunError(ctx, taskID, createFailedMessage, checkedAt, interval) {
+			if !m.retryRunError(ctx, taskID, createFailedMessage, checkedAt, createRetryInterval) {
 				return false
 			}
 			continue
@@ -549,6 +552,13 @@ prepareLoop:
 				}
 				if result.Code == 100034 && result.PayMoney > 0 {
 					m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
+					continue prepareLoop
+				}
+				if shouldWaitForNoProxyCreate412(result, proxyRuntime) {
+					m.setRuntimeWithCheckedAt(taskID, "running", formatRetryMessage("创建订单失败："+createErr.Error()), "warn", checkedAt)
+					if !m.wait(ctx, noProxyCreate412RetryWait) {
+						return orderAttemptStopped
+					}
 					continue prepareLoop
 				}
 				createFailedMessage = "创建订单失败：" + createErr.Error()
@@ -803,6 +813,17 @@ func shouldSwitchProxyForCreateError(result biliticket.OrderCreateResult, err er
 		return true
 	}
 	return proxynet.IsRequestError(err)
+}
+
+func shouldWaitForNoProxyCreate412(result biliticket.OrderCreateResult, proxyRuntime *taskProxyRuntime) bool {
+	return proxyRuntime == nil && result.Code == 412
+}
+
+func createErrorRetryInterval(result biliticket.OrderCreateResult, proxyRuntime *taskProxyRuntime, fallback time.Duration) time.Duration {
+	if shouldWaitForNoProxyCreate412(result, proxyRuntime) {
+		return noProxyCreate412RetryWait
+	}
+	return fallback
 }
 
 func (m *Manager) switchProxyOnRequestError(ctx context.Context, taskID int64, proxyRuntime *taskProxyRuntime, err error) bool {

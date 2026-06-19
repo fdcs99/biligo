@@ -572,6 +572,64 @@ func TestRunnerRetriesDefaultBBRWarning(t *testing.T) {
 	}
 }
 
+func TestRunnerWaitsBeforeRetryingCreate412WithoutProxy(t *testing.T) {
+	originalWait := noProxyCreate412RetryWait
+	noProxyCreate412RetryWait = 80 * time.Millisecond
+	t.Cleanup(func() {
+		noProxyCreate412RetryWait = originalWait
+	})
+
+	var mu sync.Mutex
+	createAttempts := make([]time.Time, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			writeRunnerJSON(t, w, ticketDetailPayload(true))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			mu.Lock()
+			createAttempts = append(createAttempts, time.Now())
+			attempt := len(createAttempts)
+			mu.Unlock()
+			if attempt == 1 {
+				writeRunnerJSON(t, w, map[string]any{"code": 412, "message": "risk"})
+				return
+			}
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-412", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-412"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRunnableTaskWithPollInterval(t, 1)
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-412" {
+		t.Fatalf("OrderID = %q, want ORDER-412", updated.OrderID)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(createAttempts) < 2 {
+		t.Fatalf("create attempts = %d, want at least 2", len(createAttempts))
+	}
+	if elapsed := createAttempts[1].Sub(createAttempts[0]); elapsed < 60*time.Millisecond {
+		t.Fatalf("create retry elapsed = %v, want no-proxy 412 wait", elapsed)
+	}
+}
+
 func TestRunnerSwitchesProxyOnCreateV2RiskCodes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1180,7 +1238,17 @@ func createRunnableTask(t *testing.T) (*store.Store, model.Task) {
 	return createRunnableTaskAt(t, time.Now().Add(-time.Second))
 }
 
+func createRunnableTaskWithPollInterval(t *testing.T, pollIntervalMillis int) (*store.Store, model.Task) {
+	t.Helper()
+	return createRunnableTaskAtWithPollInterval(t, time.Now().Add(-time.Second), pollIntervalMillis)
+}
+
 func createRunnableTaskAt(t *testing.T, saleStart time.Time) (*store.Store, model.Task) {
+	t.Helper()
+	return createRunnableTaskAtWithPollInterval(t, saleStart, 50)
+}
+
+func createRunnableTaskAtWithPollInterval(t *testing.T, saleStart time.Time, pollIntervalMillis int) (*store.Store, model.Task) {
 	t.Helper()
 
 	taskStore, err := store.Open(":memory:")
@@ -1214,7 +1282,7 @@ func createRunnableTaskAt(t *testing.T, saleStart time.Time) (*store.Store, mode
 		Tel:                "13800000000",
 		DeliverInfo:        &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000", FullAddress: "上海市测试路 1 号"},
 		EndAt:              saleStart.Add(10 * time.Second).Format(time.RFC3339),
-		PollIntervalMillis: 50,
+		PollIntervalMillis: pollIntervalMillis,
 	})
 	if err != nil {
 		taskStore.Close()
