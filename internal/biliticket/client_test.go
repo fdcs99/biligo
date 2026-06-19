@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/fdcs99/biligo/internal/model"
 )
@@ -528,6 +529,25 @@ func TestFetchAccountContextDoesNotFetchProjectDetail(t *testing.T) {
 	}
 	if len(context.Addresses) != 1 || context.Addresses[0].ID != 9 {
 		t.Fatalf("unexpected addresses: %#v", context.Addresses)
+	}
+}
+
+func TestFormatUnixUsesChinaTime(t *testing.T) {
+	originalLocal := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() {
+		time.Local = originalLocal
+	})
+
+	instant, err := time.Parse(time.RFC3339, "2026-06-13T20:00:00+08:00")
+	if err != nil {
+		t.Fatalf("parse instant: %v", err)
+	}
+	if got := formatUnix(instant.Unix()); got != "2026-06-13 20:00:00" {
+		t.Fatalf("formatUnix seconds = %q, want 2026-06-13 20:00:00", got)
+	}
+	if got := formatUnix(instant.UnixMilli()); got != "2026-06-13 20:00:00" {
+		t.Fatalf("formatUnix millis = %q, want 2026-06-13 20:00:00", got)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 
 	"github.com/fdcs99/biligo/internal/biliauth"
 	"github.com/fdcs99/biligo/internal/model"
+	"github.com/fdcs99/biligo/internal/tickettime"
 	"github.com/skip2/go-qrcode"
 )
 
@@ -1298,13 +1299,7 @@ func maxInt64(left int64, right int64) int64 {
 }
 
 func formatUnix(timestamp int64) string {
-	if timestamp <= 0 {
-		return ""
-	}
-	if timestamp > 1_000_000_000_000 {
-		timestamp /= 1000
-	}
-	return time.Unix(timestamp, 0).Format("2006-01-02 15:04:05")
+	return tickettime.FormatUnix(timestamp)
 }
 
 func formatPrice(price int64) string {

@@ -1309,11 +1309,12 @@ function defaultEndAtFromSaleStart(saleStart: string) {
 
 function formatDateTimeInput(date: Date) {
   const pad = (value: number) => String(value).padStart(2, '0')
+  const chinaDate = new Date(date.getTime() + chinaTimeZoneOffsetMillis)
   return [
-    date.getFullYear(),
-    pad(date.getMonth() + 1),
-    pad(date.getDate()),
-  ].join('-') + `T${pad(date.getHours())}:${pad(date.getMinutes())}`
+    chinaDate.getUTCFullYear(),
+    pad(chinaDate.getUTCMonth() + 1),
+    pad(chinaDate.getUTCDate()),
+  ].join('-') + `T${pad(chinaDate.getUTCHours())}:${pad(chinaDate.getUTCMinutes())}`
 }
 
 function buyerLabel(buyer: TicketBuyer) {
@@ -1656,16 +1657,35 @@ function formatDuration(durationMs: number) {
   return `${hours}小时${minutes}分${seconds}秒`
 }
 
+const chinaTimeZoneOffset = '+08:00'
+const chinaTimeZoneOffsetMillis = 8 * 60 * 60 * 1000
+const explicitTimeZonePattern = /(?:Z|[+-]\d{2}:?\d{2})$/i
+
 function parseTaskTime(value: string) {
-  if (!value) {
+  const normalized = normalizeTaskTime(value)
+  if (!normalized) {
     return null
   }
-  const normalized = value.includes('T') ? value : value.replace(' ', 'T')
   const parsed = new Date(normalized)
   if (Number.isNaN(parsed.getTime())) {
     return null
   }
   return parsed
+}
+
+function normalizeTaskTime(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return ''
+  }
+  let normalized = trimmed.includes('T') ? trimmed : trimmed.replace(' ', 'T')
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    normalized = `${normalized}T00:00:00`
+  }
+  if (!explicitTimeZonePattern.test(normalized)) {
+    normalized = `${normalized}${chinaTimeZoneOffset}`
+  }
+  return normalized
 }
 
 function calibratedNowMs(task: Task) {

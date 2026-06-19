@@ -151,6 +151,7 @@ docker run -d \
   -v "$PWD/config.yaml:/app/config.yaml" \
   -v "$PWD/data:/app/data" \
   -v "$PWD/logs:/app/logs" \
+  -e TZ="Asia/Shanghai" \
   "$IMAGE"
 ```
 
@@ -169,6 +170,7 @@ docker run -d \
   -v "$PWD/config.yaml:/app/config.yaml" \
   -v "$PWD/data:/app/data" \
   -v "$PWD/logs:/app/logs" \
+  -e TZ="Asia/Shanghai" \
   "$IMAGE"
 ```
 
@@ -187,6 +189,7 @@ docker run -d \
   -v "$PWD/config.yaml:/app/config.yaml" \
   -v "$PWD/data:/app/data" \
   -v "$PWD/logs:/app/logs" \
+  -e TZ="Asia/Shanghai" \
   "$IMAGE"
 ```
 
@@ -219,6 +222,7 @@ docker run -d \
   -v "$PWD/config.yaml:/app/config.yaml" \
   -v "$PWD/data:/app/data" \
   -v "$PWD/logs:/app/logs" \
+  -e TZ="Asia/Shanghai" \
   -e BILIGO_ADDR=":18080" \
   -e BILIGO_PANEL_PASSWORD="your-panel-password" \
   "$IMAGE"
@@ -231,6 +235,7 @@ docker run -d \
 - `BILIGO_DB`：数据库路径，例如 `/app/data/biligo.db`。
 - `BILIGO_LOG_LEVELS`：日志等级，例如 `info,warn,error`，设置为 `none` 可关闭输出。
 - `BILIGO_LOG_COLOR`：控制台颜色，支持 `auto`、`always`、`never`。
+- `TZ`：容器时区，例如 `Asia/Shanghai`。票务时间计算已固定按东八区解析，设置 `TZ` 主要用于日志和系统时间显示更直观。
 
 ### 4. 停止和升级
 

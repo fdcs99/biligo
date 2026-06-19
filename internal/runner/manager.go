@@ -15,6 +15,7 @@ import (
 	"github.com/fdcs99/biligo/internal/notify"
 	proxynet "github.com/fdcs99/biligo/internal/proxy"
 	"github.com/fdcs99/biligo/internal/store"
+	"github.com/fdcs99/biligo/internal/tickettime"
 	"github.com/fdcs99/biligo/internal/timesync"
 )
 
@@ -1110,26 +1111,7 @@ func validateTask(task model.Task) error {
 }
 
 func parseTaskTime(value string) (time.Time, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return time.Time{}, errors.New("时间为空")
-	}
-	formats := []string{
-		time.RFC3339,
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05",
-		"2006-01-02 15:04",
-		"2006-01-02T15:04",
-	}
-	var lastErr error
-	for _, format := range formats {
-		parsed, err := time.ParseInLocation(format, value, time.Local)
-		if err == nil {
-			return parsed, nil
-		}
-		lastErr = err
-	}
-	return time.Time{}, lastErr
+	return tickettime.Parse(value)
 }
 
 func firstNonEmpty(values ...string) string {

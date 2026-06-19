@@ -124,13 +124,51 @@ func TestValidateHybridTaskRequirements(t *testing.T) {
 	}
 }
 
-func TestParseTaskTimeAcceptsSaleStartFormat(t *testing.T) {
+func TestParseTaskTimeTreatsPlainTimesAsChinaTime(t *testing.T) {
+	originalLocal := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() {
+		time.Local = originalLocal
+	})
+
 	parsed, err := parseTaskTime("2026-06-13 20:00:00")
 	if err != nil {
 		t.Fatalf("parseTaskTime: %v", err)
 	}
-	if parsed.Year() != 2026 || parsed.Month() != 6 || parsed.Day() != 13 {
-		t.Fatalf("unexpected parsed time: %v", parsed)
+	want, err := time.Parse(time.RFC3339, "2026-06-13T20:00:00+08:00")
+	if err != nil {
+		t.Fatalf("parse wanted time: %v", err)
+	}
+	if !parsed.Equal(want) {
+		t.Fatalf("parseTaskTime = %v, want %v", parsed, want)
+	}
+
+	parsedMinute, err := parseTaskTime("2026-06-13T20:00")
+	if err != nil {
+		t.Fatalf("parseTaskTime minute format: %v", err)
+	}
+	if !parsedMinute.Equal(want) {
+		t.Fatalf("parseTaskTime minute format = %v, want %v", parsedMinute, want)
+	}
+}
+
+func TestParseTaskTimeHonorsRFC3339Zone(t *testing.T) {
+	originalLocal := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() {
+		time.Local = originalLocal
+	})
+
+	parsed, err := parseTaskTime("2026-06-13T20:00:00Z")
+	if err != nil {
+		t.Fatalf("parseTaskTime: %v", err)
+	}
+	want, err := time.Parse(time.RFC3339, "2026-06-13T20:00:00Z")
+	if err != nil {
+		t.Fatalf("parse wanted time: %v", err)
+	}
+	if !parsed.Equal(want) {
+		t.Fatalf("parseTaskTime = %v, want %v", parsed, want)
 	}
 }
 
