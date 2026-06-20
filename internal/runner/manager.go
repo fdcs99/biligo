@@ -1296,11 +1296,13 @@ func (m *Manager) refreshHotProjectBeforeSaleStart(ctx context.Context, taskID i
 		return task, true
 	}
 
+	m.setRuntime(taskID, "waiting_start", fmt.Sprintf("开票前 5 分钟开始校验 hot_project 状态，当前本地状态为 %t。", task.IsHotProject), "info")
 	var lastErr error
 	for attempt := 1; attempt <= hotProjectCheckAttempts; attempt++ {
 		isHotProject, err := m.ticket.FetchProjectHotProject(ctx, task.ProjectID, cookie)
 		if err == nil {
 			if isHotProject == task.IsHotProject {
+				m.setRuntime(taskID, "waiting_start", fmt.Sprintf("开票前 hot_project 状态校验完成，远端状态与本地一致：%t。", isHotProject), "info")
 				return task, true
 			}
 			message := fmt.Sprintf("开票前检测到 hot_project 状态从 %t 变为 %t，已更新任务并重新下发。", task.IsHotProject, isHotProject)

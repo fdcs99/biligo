@@ -406,6 +406,66 @@ func TestRunnerRefreshesHotProjectBeforeSaleStart(t *testing.T) {
 	}
 }
 
+func TestRunnerLogsHotProjectPreSaleCheckWhenStateUnchanged(t *testing.T) {
+	var infoCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusNoContent)
+		case "/mall-search-items/items_detail/info":
+			infoCalls.Add(1)
+			writeRunnerJSON(t, w, ticketDetailPayloadWithHotProject(true, false))
+		case "/api/ticket/project/getV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{}})
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-HOT-UNCHANGED", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-HOT-UNCHANGED"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRunnableTaskAt(t, time.Now().Add(2*time.Second))
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.IsHotProject {
+		t.Fatal("IsHotProject = true, want false after unchanged refresh")
+	}
+	if infoCalls.Load() != 1 {
+		t.Fatalf("project info calls = %d, want 1", infoCalls.Load())
+	}
+	logs, err := taskStore.ListTaskLogs(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("ListTaskLogs: %v", err)
+	}
+	foundStartLog := false
+	foundUnchangedLog := false
+	for _, log := range logs {
+		if strings.Contains(log.Message, "开票前 5 分钟开始校验 hot_project 状态") {
+			foundStartLog = true
+		}
+		if strings.Contains(log.Message, "开票前 hot_project 状态校验完成，远端状态与本地一致：false") {
+			foundUnchangedLog = true
+		}
+	}
+	if !foundStartLog || !foundUnchangedLog {
+		t.Fatalf("hot project check logs missing start=%v unchanged=%v logs=%#v", foundStartLog, foundUnchangedLog, logs)
+	}
+}
+
 func TestRunnerKeepsLocalHotProjectAfterPreSaleRefreshFailures(t *testing.T) {
 	var infoCalls atomic.Int32
 	var prepareToken atomic.Value
