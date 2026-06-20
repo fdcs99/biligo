@@ -205,6 +205,13 @@ jobs:
           username: fdcs99
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Login To Aliyun Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: crpi-rlahqzawqg2sd5in.cn-hangzhou.personal.cr.aliyuncs.com
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
       - name: Docker Metadata
         id: meta
         uses: docker/metadata-action@v6
@@ -212,6 +219,7 @@ jobs:
           images: |
             ghcr.io/fdcs99/biligo
             fdcs99/biligo
+            crpi-rlahqzawqg2sd5in.cn-hangzhou.personal.cr.aliyuncs.com/fdcs99/biligo
           tags: |
             type=ref,event=tag
             type=raw,value=latest

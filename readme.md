@@ -121,7 +121,7 @@ http://127.0.0.1:8080/api/health
 <summary>展开查看 Docker 部署说明</summary>
 
 本仓库发布的 Docker 镜像默认已嵌入前端页面，容器启动后只需要暴露一个端口，同时提供 Web 控制台和 `/api`。
-Release 发布时会同时推送到 Docker Hub 和 GitHub Container Registry，也可使用阿里云镜像源。
+Release 发布时会通过 GitHub Actions 同时推送到 Docker Hub、GitHub Container Registry 和阿里云镜像源。
 
 ### 1. 准备运行目录
 
