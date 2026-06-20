@@ -685,9 +685,9 @@
 
 下发任务。行为由 `taskMode` 决定：
 
-- `rush`：后端会先按任务的 `timeSyncStrategy` 同步时间，并写入 `timeOffsetMillis` 与 `timeSyncedAt`；随后启动内置任务运行器，使用“本地时间 + offset”等待票档起售时间。距离起售不足 30 秒时会向 `https://show.bilibili.com` 发送 5 个 `HEAD` 请求预热 keep-alive 连接，并保留在同一个 HTTP client 的空闲连接池中供后续订单请求复用。到达起售时间后不再额外检测票档状态，而是直接调用订单准备、订单创建和支付参数接口。
+- `rush`：后端会先按任务的 `timeSyncStrategy` 同步时间，并写入 `timeOffsetMillis` 与 `timeSyncedAt`；随后启动内置任务运行器，使用“本地时间 + offset”等待票档起售时间。距离起售不足 5 分钟时会拉取一次项目详情校验 `hot_project` 状态，若状态变化会更新任务并按新状态继续等待起售；校验失败会最多重试 10 次，仍失败则继续使用任务本地状态。距离起售不足 30 秒时会向 `https://show.bilibili.com` 发送 5 个 `HEAD` 请求预热 keep-alive 连接，并保留在同一个 HTTP client 的空闲连接池中供后续订单请求复用。到达起售时间后不再额外检测票档状态，而是直接调用订单准备、订单创建和支付参数接口。
 - `restock`：后端不会等待开票、不会进行时间同步和预热，而是立即进入 `running`，按 `pollIntervalMillis` 每轮获取一次票务信息；在最新接口返回顺序中找到第一个属于 `selectedTickets` 且 `clickable=true` 的票种后，先写入任务主票种字段，再复用订单准备、订单创建和支付参数接口。订单准备失败，或同一次准备后的创建订单批次失败后会回到票种检测；订单已创建但支付参数获取失败时继续重试支付参数。`durationMode=limited` 时超过 `endAt` 会停止检测，`durationMode=unlimited` 时持续检测直到用户停止、删除或下单成功。
-- `rush_restock`：后端会先按抢票模式同步时间、等待起售并预热连接；到达起售时间后直接尝试订单流程。抢票段截止时间为“抢票阶段第一次订单请求发出时间 + `rushDurationSeconds`”，使用同步后的时间 offset 判断。抢票段成功进入 `waiting_payment` 或检测到重复订单时任务结束；抢票窗口结束仍未成功时写入“抢票窗口结束，切换回流捡漏。”日志，并进入回流捡漏流程。切换后的回流段不再重新时间同步或等待开票，`durationMode/endAt` 只作用于回流段。
+- `rush_restock`：后端会先按抢票模式同步时间、等待起售、校验 `hot_project` 并预热连接；到达起售时间后直接尝试订单流程。抢票段截止时间为“抢票阶段第一次订单请求发出时间 + `rushDurationSeconds`”，使用同步后的时间 offset 判断。抢票段成功进入 `waiting_payment` 或检测到重复订单时任务结束；抢票窗口结束仍未成功时写入“抢票窗口结束，切换回流捡漏。”日志，并进入回流捡漏流程。切换后的回流段不再重新时间同步或等待开票，`durationMode/endAt` 只作用于回流段。
 
 订单阶段采用“1 次 `prepare` 搭配最多 4 次 `createV2`”的重试策略：订单准备成功后，会在同一份准备结果下连续尝试创建订单，任意一次成功即进入支付参数获取；4 次 `createV2` 均失败后才按 `pollIntervalMillis` 等待并重新请求 `prepare`。若 `createV2` 返回 `100034` 且携带新金额，后端会先更新任务金额，再立即重新请求一次 `prepare`，不继续复用旧的准备结果。回流捡漏命中票种后也遵循同一策略，4 次创建订单均失败才回到票种检测列表。运行中的其他接口错误会按 `pollIntervalMillis` 继续重试，成功后进入 `waiting_payment`。
 

@@ -178,7 +178,7 @@ func TestWaitUntilSaleStartCanBeCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if manager.waitUntilSaleStart(ctx, 0, time.Now().Add(time.Hour), 0, nil) {
+	if manager.waitUntilSaleStart(ctx, 0, time.Now().Add(time.Hour), 0, nil, nil) {
 		t.Fatal("waitUntilSaleStart returned true after cancellation")
 	}
 }
@@ -302,6 +302,10 @@ func TestRunnerWarmupsShowHomeBeforeSaleStart(t *testing.T) {
 			}
 			headCalls.Add(1)
 			w.WriteHeader(http.StatusNoContent)
+		case "/mall-search-items/items_detail/info":
+			writeRunnerJSON(t, w, ticketDetailPayload(false))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
 		case "/api/ticket/order/prepare":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
 		case "/api/ticket/order/createV2":
@@ -328,6 +332,102 @@ func TestRunnerWarmupsShowHomeBeforeSaleStart(t *testing.T) {
 	}
 	if headCalls.Load() != saleStartWarmupRequestCount {
 		t.Fatalf("HEAD calls = %d, want %d", headCalls.Load(), saleStartWarmupRequestCount)
+	}
+}
+
+func TestRunnerRefreshesHotProjectBeforeSaleStart(t *testing.T) {
+	var infoCalls atomic.Int32
+	var prepareToken atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusNoContent)
+		case "/mall-search-items/items_detail/info":
+			infoCalls.Add(1)
+			writeRunnerJSON(t, w, ticketDetailPayloadWithHotProject(true, true))
+		case "/api/ticket/project/getV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{}})
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			payload := decodeRunnerJSONBody(t, r)
+			prepareToken.Store(stringValueFromBody(payload["token"]))
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token", "ptoken": "hot-ptoken"}})
+		case "/api/ticket/order/createV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-HOT", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-HOT"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRunnableTaskAt(t, time.Now().Add(2*time.Second))
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if !updated.IsHotProject {
+		t.Fatal("IsHotProject = false, want true after pre-sale refresh")
+	}
+	if infoCalls.Load() != 1 {
+		t.Fatalf("project info calls = %d, want 1", infoCalls.Load())
+	}
+	if token, _ := prepareToken.Load().(string); token == "" {
+		t.Fatal("prepare token is empty, want hot project ctoken")
+	}
+}
+
+func TestRunnerKeepsLocalHotProjectAfterPreSaleRefreshFailures(t *testing.T) {
+	var infoCalls atomic.Int32
+	var prepareToken atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusNoContent)
+		case "/mall-search-items/items_detail/info":
+			infoCalls.Add(1)
+			http.Error(w, "temporary failure", http.StatusBadGateway)
+		case "/api/ticket/project/getV2":
+			http.Error(w, "temporary failure", http.StatusBadGateway)
+		case "/api/ticket/order/prepare":
+			payload := decodeRunnerJSONBody(t, r)
+			prepareToken.Store(stringValueFromBody(payload["token"]))
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-LOCAL", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-LOCAL"}})
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	taskStore, task := createRunnableTaskAt(t, time.Now().Add(2*time.Second))
+	defer taskStore.Close()
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.IsHotProject {
+		t.Fatal("IsHotProject = true, want false after refresh failures")
+	}
+	if infoCalls.Load() != hotProjectCheckAttempts {
+		t.Fatalf("project info calls = %d, want %d", infoCalls.Load(), hotProjectCheckAttempts)
+	}
+	if token, _ := prepareToken.Load().(string); token != "" {
+		t.Fatalf("prepare token = %q, want empty local non-hot state", token)
 	}
 }
 
@@ -1519,13 +1619,17 @@ func formatBusinessTaskTime(value time.Time) string {
 }
 
 func ticketDetailPayload(available bool) map[string]any {
+	return ticketDetailPayloadWithHotProject(available, false)
+}
+
+func ticketDetailPayloadWithHotProject(available bool, hotProject bool) map[string]any {
 	return map[string]any{
 		"code":    0,
 		"success": true,
 		"data": map[string]any{
 			"projectId":   1001701,
 			"projectName": "测试项目",
-			"hotProject":  false,
+			"hotProject":  hotProject,
 			"screenList": []map[string]any{
 				{
 					"id":          2001,
@@ -1618,6 +1722,13 @@ func int64FromBody(value any) int64 {
 	default:
 		return 0
 	}
+}
+
+func stringValueFromBody(value any) string {
+	if typed, ok := value.(string); ok {
+		return typed
+	}
+	return ""
 }
 
 func writeRunnerJSON(t *testing.T, w http.ResponseWriter, payload any) {

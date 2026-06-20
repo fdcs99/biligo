@@ -263,6 +263,17 @@ func (c *Client) FetchAccountContext(ctx context.Context, projectID int64, cooki
 	}, nil
 }
 
+func (c *Client) FetchProjectHotProject(ctx context.Context, projectID int64, cookie string) (bool, error) {
+	if projectID <= 0 {
+		return false, errors.New("项目 ID 不能为空")
+	}
+	project, err := c.FetchProject(ctx, strconv.FormatInt(projectID, 10), cookie)
+	if err != nil {
+		return false, err
+	}
+	return project.IsHotProject, nil
+}
+
 func (c *Client) CheckTicketStatus(ctx context.Context, task model.Task, cookie string) (model.TicketOption, bool, error) {
 	project, err := c.FetchProject(ctx, strconv.FormatInt(task.ProjectID, 10), cookie)
 	if err != nil {

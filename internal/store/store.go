@@ -1041,6 +1041,34 @@ func (s *Store) SetTaskPayMoney(ctx context.Context, id int64, payMoney int64, m
 	return task, log, nil
 }
 
+func (s *Store) SetTaskHotProject(ctx context.Context, id int64, isHotProject bool, message string) (model.Task, model.TaskLog, error) {
+	now := nowText()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tasks
+		SET is_hot_project = ?,
+			last_message = COALESCE(NULLIF(?, ''), last_message),
+			updated_at = ?
+		WHERE id = ?
+	`, boolToInt(isHotProject), strings.TrimSpace(message), now, id)
+	if err != nil {
+		return model.Task{}, model.TaskLog{}, err
+	}
+
+	var log model.TaskLog
+	if strings.TrimSpace(message) != "" {
+		log, err = s.AddTaskLog(ctx, id, "info", message)
+		if err != nil {
+			return model.Task{}, model.TaskLog{}, err
+		}
+	}
+
+	task, err := s.GetTask(ctx, id)
+	if err != nil {
+		return model.Task{}, model.TaskLog{}, err
+	}
+	return task, log, nil
+}
+
 func (s *Store) SetTaskMatchedTicket(ctx context.Context, id int64, ticket model.TicketOption, quantity int, message string, checkedAt string) (model.Task, model.TaskLog, error) {
 	now := nowText()
 	if quantity <= 0 {

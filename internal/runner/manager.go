@@ -38,6 +38,9 @@ type Manager struct {
 const (
 	saleStartWaitTick             = time.Millisecond * 50 // 等待 50 ms
 	saleStartWaitReportInterval   = time.Second
+	hotProjectCheckBefore         = 5 * time.Minute
+	hotProjectCheckAttempts       = 10
+	hotProjectCheckRetryInterval  = 100 * time.Millisecond
 	saleStartWarmupBefore         = 30 * time.Second
 	saleStartWarmupRequestCount   = 5
 	defaultProxyAPIPullBefore     = 5 * time.Minute
@@ -240,7 +243,11 @@ func (m *Manager) runRush(ctx context.Context, taskID int64, cookie string, task
 	}
 	timeOffset := time.Duration(task.TimeOffsetMillis) * time.Millisecond
 
-	if !m.waitUntilSaleStart(ctx, taskID, saleStart, timeOffset, proxyRuntime) {
+	if !m.waitUntilSaleStart(ctx, taskID, saleStart, timeOffset, proxyRuntime, func() bool {
+		updated, ok := m.refreshHotProjectBeforeSaleStart(ctx, taskID, task, cookie)
+		task = updated
+		return ok
+	}) {
 		return
 	}
 	if proxyRuntime != nil {
@@ -279,7 +286,11 @@ func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, ta
 	}
 	timeOffset := time.Duration(task.TimeOffsetMillis) * time.Millisecond
 
-	if !m.waitUntilSaleStart(ctx, taskID, saleStart, timeOffset, proxyRuntime) {
+	if !m.waitUntilSaleStart(ctx, taskID, saleStart, timeOffset, proxyRuntime, func() bool {
+		updated, ok := m.refreshHotProjectBeforeSaleStart(ctx, taskID, task, cookie)
+		task = updated
+		return ok
+	}) {
 		return
 	}
 	if proxyRuntime != nil {
@@ -967,8 +978,9 @@ func (m *Manager) wait(ctx context.Context, duration time.Duration) bool {
 	}
 }
 
-func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStart time.Time, timeOffset time.Duration, proxyRuntime *taskProxyRuntime) bool {
+func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStart time.Time, timeOffset time.Duration, proxyRuntime *taskProxyRuntime, hotProjectCheck func() bool) bool {
 	nextReportAt := time.Now().Add(saleStartWaitReportInterval)
+	hotProjectChecked := false
 	warmedUp := false
 	for {
 		remaining := saleStart.Sub(nowWithOffset(timeOffset))
@@ -977,6 +989,12 @@ func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStar
 		}
 		if ctx.Err() != nil {
 			return false
+		}
+		if !hotProjectChecked && remaining <= hotProjectCheckBefore {
+			hotProjectChecked = true
+			if hotProjectCheck != nil && !hotProjectCheck() {
+				return false
+			}
 		}
 		if proxyRuntime != nil && proxyRuntime.shouldPull(remaining) {
 			if err := proxyRuntime.pullAndActivate(ctx); err != nil {
@@ -1008,6 +1026,41 @@ func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStar
 			return false
 		}
 	}
+}
+
+func (m *Manager) refreshHotProjectBeforeSaleStart(ctx context.Context, taskID int64, task model.Task, cookie string) (model.Task, bool) {
+	if m.ticket == nil {
+		return task, true
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= hotProjectCheckAttempts; attempt++ {
+		isHotProject, err := m.ticket.FetchProjectHotProject(ctx, task.ProjectID, cookie)
+		if err == nil {
+			if isHotProject == task.IsHotProject {
+				return task, true
+			}
+			message := fmt.Sprintf("开票前检测到 hot_project 状态从 %t 变为 %t，已更新任务并重新下发。", task.IsHotProject, isHotProject)
+			updated, log, err := m.store.SetTaskHotProject(context.Background(), taskID, isHotProject, message)
+			if err != nil {
+				m.setRuntime(taskID, "waiting_start", "更新 hot_project 状态失败："+err.Error()+"，继续使用本地状态。", "warn")
+				return task, true
+			}
+			m.publishTaskAndLog(updated, log)
+			return updated, true
+		}
+		lastErr = err
+		if attempt < hotProjectCheckAttempts && !m.wait(ctx, hotProjectCheckRetryInterval) {
+			return task, false
+		}
+	}
+
+	message := fmt.Sprintf("开票前 hot_project 状态校验连续失败 %d 次，继续使用本地状态。", hotProjectCheckAttempts)
+	if lastErr != nil {
+		message += "最后错误：" + lastErr.Error()
+	}
+	m.setRuntime(taskID, "waiting_start", message, "warn")
+	return task, true
 }
 
 // 预热连接
