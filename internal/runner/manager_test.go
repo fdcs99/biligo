@@ -212,7 +212,7 @@ func TestWaitUntilSaleStartCanBeCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if manager.waitUntilSaleStart(ctx, 0, time.Now().Add(time.Hour), 0, nil, nil) {
+	if manager.waitUntilSaleStart(ctx, 0, time.Now().Add(time.Hour), 0, nil, nil, true) {
 		t.Fatal("waitUntilSaleStart returned true after cancellation")
 	}
 }
@@ -366,6 +366,89 @@ func TestRunnerWarmupsShowHomeBeforeSaleStart(t *testing.T) {
 	}
 	if headCalls.Load() != saleStartWarmupRequestCount {
 		t.Fatalf("HEAD calls = %d, want %d", headCalls.Load(), saleStartWarmupRequestCount)
+	}
+}
+
+func TestRunnerConcurrentProxySkipsWarmupBeforeSaleStart(t *testing.T) {
+	var headCalls atomic.Int32
+	var firstCreateCalls atomic.Int32
+	var secondCreateCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			writeRunnerJSON(t, w, ticketDetailPayloadWithHotProject(false, false))
+		case "/api/ticket/project/getV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{}})
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		default:
+			t.Fatalf("unexpected base server path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	firstProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/":
+			if r.Method == http.MethodHead {
+				headCalls.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			t.Fatalf("unexpected first proxy root method: %s", r.Method)
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			firstCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 412, "message": "risk"})
+		default:
+			t.Fatalf("unexpected first proxy path: %s", r.URL.Path)
+		}
+	}))
+	defer firstProxy.Close()
+	secondProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/":
+			if r.Method == http.MethodHead {
+				headCalls.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			t.Fatalf("unexpected second proxy root method: %s", r.Method)
+		case "/api/ticket/order/prepare":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			secondCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-CONCURRENT", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-CONCURRENT"}})
+		default:
+			t.Fatalf("unexpected second proxy path: %s", r.URL.Path)
+		}
+	}))
+	defer secondProxy.Close()
+
+	taskStore, task := createRunnableTaskAt(t, time.Now().Add(2*time.Second))
+	defer taskStore.Close()
+	groupID := createProxyGroupForRunner(t, taskStore, firstProxy.URL, secondProxy.URL)
+	task = updateTaskProxyGroupWithMode(t, taskStore, task, groupID, model.ProxyModeConcurrent)
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(server.Client(), server.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-CONCURRENT" {
+		t.Fatalf("OrderID = %q, want ORDER-CONCURRENT", updated.OrderID)
+	}
+	if headCalls.Load() != 0 {
+		t.Fatalf("HEAD calls = %d, want 0 for concurrent proxy warmup", headCalls.Load())
+	}
+	if firstCreateCalls.Load() == 0 || secondCreateCalls.Load() == 0 {
+		t.Fatalf("create calls = %d/%d, want both concurrent workers active", firstCreateCalls.Load(), secondCreateCalls.Load())
 	}
 }
 

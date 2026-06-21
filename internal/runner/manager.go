@@ -248,7 +248,7 @@ func (m *Manager) runRush(ctx context.Context, taskID int64, cookie string, task
 		updated, ok := m.refreshHotProjectBeforeSaleStart(ctx, taskID, task, cookie)
 		task = updated
 		return ok
-	}) {
+	}, !isConcurrentProxyTask(task)) {
 		return
 	}
 	if proxyRuntime != nil {
@@ -292,7 +292,7 @@ func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, ta
 		updated, ok := m.refreshHotProjectBeforeSaleStart(ctx, taskID, task, cookie)
 		task = updated
 		return ok
-	}) {
+	}, !isConcurrentProxyTask(task)) {
 		return
 	}
 	if proxyRuntime != nil {
@@ -1243,7 +1243,7 @@ func (m *Manager) wait(ctx context.Context, duration time.Duration) bool {
 	}
 }
 
-func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStart time.Time, timeOffset time.Duration, proxyRuntime *taskProxyRuntime, hotProjectCheck func() bool) bool {
+func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStart time.Time, timeOffset time.Duration, proxyRuntime *taskProxyRuntime, hotProjectCheck func() bool, warmupEnabled bool) bool {
 	nextReportAt := time.Now().Add(saleStartWaitReportInterval)
 	hotProjectChecked := false
 	warmedUp := false
@@ -1268,7 +1268,7 @@ func (m *Manager) waitUntilSaleStart(ctx context.Context, taskID int64, saleStar
 				m.setRuntime(taskID, "waiting_start", proxyAPIReadyMessage(proxyRuntime.nodes), "info")
 			}
 		}
-		if !warmedUp && remaining <= saleStartWarmupBefore {
+		if warmupEnabled && !warmedUp && remaining <= saleStartWarmupBefore {
 			warmedUp = true
 			if proxyRuntime != nil {
 				if err := proxyRuntime.ensureReady(ctx); err != nil {
