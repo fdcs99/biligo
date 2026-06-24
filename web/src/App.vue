@@ -10,6 +10,7 @@ import {
   CopyDocument,
   Delete,
   Document,
+  Download,
   Edit,
   Menu as MenuIcon,
   Monitor,
@@ -17,13 +18,16 @@ import {
   Search,
   Setting,
   SwitchButton,
+  Upload,
   User,
   VideoPlay,
   View,
 } from '@element-plus/icons-vue'
 import type {
   Account,
+  AccountExportItem,
   AccountInput,
+  AccountImportInput,
   EventSnapshot,
   Health,
   Notification,
@@ -54,6 +58,7 @@ import {
 } from './api'
 
 type SectionKey = 'accounts' | 'notifications' | 'proxies' | 'taskConfig' | 'taskStatus'
+type AccountFormMode = 'direct' | 'json'
 type QRLoginStatus = 'idle' | 'generated' | 'waiting_scan' | 'waiting_confirm' | 'confirmed' | 'expired' | 'failed'
 type TicketProjectHistorySuggestion = TicketProjectHistory & { value: string }
 
@@ -98,6 +103,10 @@ const accountForm = reactive<AccountInput>({
   cookie: '',
   note: '',
 })
+const accountFormMode = ref<AccountFormMode>('direct')
+const accountImportJSON = ref('')
+const accountExportDialogVisible = ref(false)
+const selectedAccountExportIds = ref<number[]>([])
 
 const notificationForm = reactive<NotificationInput>({
   name: '',
@@ -205,6 +214,7 @@ const selectedTask = computed(() => tasks.value.find((task) => task.id === selec
 const selectedTaskTicketSubtitle = computed(() =>
   selectedTask.value ? taskTicketSummary(selectedTask.value) : '',
 )
+const selectedAccountExportCount = computed(() => selectedAccountExportIds.value.length)
 const pendingTasks = computed(() => tasks.value.filter((task) => task.status === 'draft' || task.status === 'paused'))
 const issuedTasks = computed(() => tasks.value.filter((task) => task.status !== 'draft' && task.status !== 'paused'))
 const selectedTicketOption = computed(() =>
@@ -291,6 +301,7 @@ async function loadAll() {
     ])
     session.value = sessionData
     accounts.value = accountData ?? []
+    syncSelectedAccountExports()
     notifications.value = notificationData ?? []
     proxyGroups.value = proxyGroupData ?? []
     ticketProjectHistories.value = historyData ?? []
@@ -377,6 +388,7 @@ function clearPanelSession() {
   tasks.value = []
   logs.value = []
   session.value = null
+  selectedAccountExportIds.value = []
 }
 
 function schedulePanelAuthExpiry(expiresAt: string) {
@@ -403,9 +415,11 @@ function clearPanelAuthExpiry() {
 
 function resetAccountForm() {
   editingAccountId.value = null
+  accountFormMode.value = 'direct'
   accountForm.name = ''
   accountForm.cookie = ''
   accountForm.note = ''
+  accountImportJSON.value = ''
 }
 
 function resetQRLogin() {
@@ -424,6 +438,7 @@ async function refreshAccountsAndSession() {
   const [accountData, sessionData] = await Promise.all([api.listAccounts(), api.session()])
   accounts.value = accountData ?? []
   session.value = sessionData
+  syncSelectedAccountExports()
 }
 
 function setActiveSection(section: SectionKey) {
@@ -442,11 +457,31 @@ function sectionIcon(section: SectionKey) {
   return map[section]
 }
 
+function syncSelectedAccountExports() {
+  const accountIds = new Set(accounts.value.map((account) => account.id))
+  selectedAccountExportIds.value = selectedAccountExportIds.value.filter((id) => accountIds.has(id))
+}
+
+function selectAllAccountExports() {
+  selectedAccountExportIds.value = accounts.value.map((account) => account.id)
+}
+
+function clearAccountExportSelection() {
+  selectedAccountExportIds.value = []
+}
+
+function openAccountExportDialog() {
+  syncSelectedAccountExports()
+  accountExportDialogVisible.value = true
+}
+
 async function editAccount(account: Account) {
   editingAccountId.value = account.id
+  accountFormMode.value = 'direct'
   accountForm.name = account.name
   accountForm.cookie = ''
   accountForm.note = account.note
+  accountImportJSON.value = ''
   activeSection.value = 'accounts'
   if (!account.hasCookie) {
     return
@@ -554,6 +589,14 @@ async function pollQRLoginOnce(auto: boolean) {
   }
 }
 
+async function submitAccountPanel() {
+  if (accountFormMode.value === 'json') {
+    await importAccount()
+    return
+  }
+  await saveAccount()
+}
+
 async function saveAccount() {
   await run(async () => {
     if (editingAccountId.value) {
@@ -592,6 +635,98 @@ async function copyAccountCookie(id: number) {
     const result = await api.getAccountCookie(id)
     await writeClipboardText(result.cookie)
   }, 'Cookie 已复制')
+}
+
+async function exportSelectedAccounts() {
+  await run(async () => {
+    const accountIds = [...selectedAccountExportIds.value]
+    if (accountIds.length === 0) {
+      throw new Error('请先选择要导出的账号')
+    }
+    const payload = await api.exportAccounts({ accountIds })
+    const text = JSON.stringify(payload, null, 2)
+    downloadJSONFile(accountsExportFileName(), text)
+    accountExportDialogVisible.value = false
+    notice.value = `已导出 ${payload.accounts.length} 个账号`
+  })
+}
+
+async function importAccount() {
+  await run(async () => {
+    const payload = parseAccountImportJSON(accountImportJSON.value)
+    const result = await api.importAccounts(payload)
+    accountImportJSON.value = ''
+    await refreshAccountsAndSession()
+    notice.value = `已导入 ${result.imported} 个账号`
+  })
+}
+
+function parseAccountImportJSON(text: string): AccountImportInput {
+  const raw = text.trim()
+  if (!raw) {
+    throw new Error('导入 JSON 不能为空')
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('导入内容不是有效 JSON')
+  }
+
+  const accounts = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === 'object' && Array.isArray((parsed as { accounts?: unknown }).accounts)
+      ? (parsed as { accounts: unknown[] }).accounts
+      : null
+  if (!accounts) {
+    throw new Error('导入 JSON 需要包含 accounts 数组')
+  }
+  return {
+    accounts: accounts.map((account, index) => normalizeAccountImportItem(account, index)),
+  }
+}
+
+function normalizeAccountImportItem(account: unknown, index: number): AccountExportItem {
+  if (!account || typeof account !== 'object') {
+    throw new Error(`第 ${index + 1} 个账号格式不正确`)
+  }
+  const item = account as Partial<Record<keyof AccountExportItem, unknown>>
+  const name = stringFromUnknown(item.name).trim()
+  if (!name) {
+    throw new Error(`第 ${index + 1} 个账号名称不能为空`)
+  }
+  return {
+    name,
+    cookie: stringFromUnknown(item.cookie).trim(),
+    note: stringFromUnknown(item.note).trim(),
+  }
+}
+
+function stringFromUnknown(value: unknown): string {
+  if (typeof value === 'string') {
+    return value
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+  return ''
+}
+
+function accountsExportFileName() {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  return `biligo-accounts-${stamp}.json`
+}
+
+function downloadJSONFile(filename: string, text: string) {
+  const blob = new Blob([text], { type: 'application/json;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
 }
 
 async function writeClipboardText(text: string) {
@@ -2147,31 +2282,59 @@ onUnmounted(() => {
             </div>
           </section>
 
-          <el-form class="panel form-panel" label-position="top" @submit.prevent="saveAccount">
+          <el-form class="panel form-panel" label-position="top" @submit.prevent="submitAccountPanel">
             <div class="panel-heading">
               <h3>{{ editingAccountId ? '编辑账号' : '新增账号' }}</h3>
               <el-button :icon="Close" text @click="resetAccountForm">清空</el-button>
             </div>
-            <el-form-item required label="账号名称">
+            <el-form-item label="添加方式">
+              <el-radio-group v-model="accountFormMode">
+                <el-radio-button label="direct">直接添加</el-radio-button>
+                <el-radio-button label="json">批量 JSON 导入</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item v-if="accountFormMode === 'direct'" required label="账号名称">
               <el-input v-model="accountForm.name" placeholder="例如：主账号" clearable />
             </el-form-item>
-            <el-form-item label="Cookie">
+            <el-form-item v-if="accountFormMode === 'direct'" label="Cookie">
               <el-input v-model="accountForm.cookie" type="textarea" :rows="5" placeholder="仅保存在本地 SQLite" />
             </el-form-item>
-            <el-form-item label="备注">
+            <el-form-item v-if="accountFormMode === 'direct'" label="备注">
               <el-input v-model="accountForm.note" placeholder="可填写实名人或用途备注" clearable />
             </el-form-item>
+            <el-form-item v-if="accountFormMode === 'json'" label="批量 JSON 导入">
+              <el-input
+                v-model="accountImportJSON"
+                type="textarea"
+                :rows="5"
+                placeholder='{"accounts":[{"name":"主账号","cookie":"SESSDATA=xxx","note":"个人使用"}]}'
+              />
+            </el-form-item>
             <div class="button-row">
-              <el-button native-type="submit" type="primary" :icon="Document" :loading="loading">保存账号</el-button>
-              <el-button :icon="Check" :disabled="loading || !accountForm.cookie" @click="loginWithCookie">验证并保存</el-button>
+              <el-button v-if="accountFormMode === 'direct'" native-type="submit" type="primary" :icon="Document" :loading="loading">
+                保存账号
+              </el-button>
+              <el-button v-if="accountFormMode === 'direct'" :icon="Check" :disabled="loading || !accountForm.cookie" @click="loginWithCookie">
+                验证并保存
+              </el-button>
+              <el-button v-if="accountFormMode === 'json'" type="primary" :icon="Upload" :disabled="loading || !accountImportJSON.trim()" @click="importAccount">
+                批量导入账号 JSON
+              </el-button>
             </div>
           </el-form>
         </div>
 
         <section class="panel list-panel">
           <div class="panel-heading">
-            <h3>账号列表</h3>
-            <span class="muted">{{ session?.message }}</span>
+            <div>
+              <h3>账号列表</h3>
+              <span class="muted">{{ session?.message }}</span>
+            </div>
+            <div class="table-actions">
+              <el-button :icon="Download" :disabled="accounts.length === 0 || loading" @click="openAccountExportDialog">
+                批量导出
+              </el-button>
+            </div>
           </div>
           <div class="summary-row">
             <el-tag>账号 {{ session?.accountCount ?? 0 }}</el-tag>
@@ -2197,6 +2360,45 @@ onUnmounted(() => {
           <el-empty v-if="accounts.length === 0" description="暂无账号" />
         </section>
       </section>
+
+      <el-dialog
+        v-model="accountExportDialogVisible"
+        title="批量导出账号"
+        width="min(520px, calc(100vw - 32px))"
+        class="account-export-dialog"
+      >
+        <div class="account-export-toolbar">
+          <div class="summary-row">
+            <el-tag>账号 {{ accounts.length }}</el-tag>
+            <el-tag type="info">已选 {{ selectedAccountExportCount }}</el-tag>
+          </div>
+          <div class="table-actions">
+            <el-button text :disabled="accounts.length === 0 || loading" @click="selectAllAccountExports">全选</el-button>
+            <el-button text :disabled="selectedAccountExportCount === 0 || loading" @click="clearAccountExportSelection">清空</el-button>
+          </div>
+        </div>
+        <el-checkbox-group v-model="selectedAccountExportIds" class="account-export-list">
+          <el-checkbox
+            v-for="account in accounts"
+            :key="account.id"
+            :value="account.id"
+            :disabled="loading"
+            class="account-export-option"
+          >
+            <span>{{ account.name }}</span>
+            <small>{{ account.cookiePreview || '未保存 Cookie' }}</small>
+          </el-checkbox>
+        </el-checkbox-group>
+        <el-empty v-if="accounts.length === 0" description="暂无账号" />
+        <template #footer>
+          <div class="dialog-footer-actions">
+            <el-button :disabled="loading" @click="accountExportDialogVisible = false">取消</el-button>
+            <el-button type="primary" :icon="Download" :loading="loading" :disabled="selectedAccountExportCount === 0" @click="exportSelectedAccounts">
+              导出选中
+            </el-button>
+          </div>
+        </template>
+      </el-dialog>
 
       <section v-if="activeSection === 'notifications'" class="content-grid">
         <el-form class="panel form-panel" label-position="top" @submit.prevent="saveNotification">

@@ -29,6 +29,31 @@ export interface AccountInput {
   note: string
 }
 
+export interface AccountExportItem {
+  name: string
+  cookie: string
+  note: string
+}
+
+export interface AccountBatchExportInput {
+  accountIds: number[]
+}
+
+export interface AccountBatchExportResponse {
+  version: number
+  exportedAt: string
+  accounts: AccountExportItem[]
+}
+
+export interface AccountImportInput {
+  accounts: AccountExportItem[]
+}
+
+export interface AccountImportResponse {
+  imported: number
+  accounts: Account[]
+}
+
 export interface AccountCookieResponse {
   accountId: number
   cookie: string
@@ -446,6 +471,10 @@ export const api = {
     request<Account>('/api/accounts', { method: 'POST', body: JSON.stringify(payload) }),
   updateAccount: (id: number, payload: AccountInput) =>
     request<Account>(`/api/accounts/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  exportAccounts: (payload: AccountBatchExportInput) =>
+    request<AccountBatchExportResponse>('/api/accounts/export', { method: 'POST', body: JSON.stringify(payload) }),
+  importAccounts: (payload: AccountImportInput) =>
+    request<AccountImportResponse>('/api/accounts/import', { method: 'POST', body: JSON.stringify(payload) }),
   getAccountCookie: (id: number) => request<AccountCookieResponse>(`/api/accounts/${id}/cookie`),
   verifyAccount: (id: number) =>
     request<AccountVerifyResponse>(`/api/accounts/${id}/verify`, { method: 'POST' }),

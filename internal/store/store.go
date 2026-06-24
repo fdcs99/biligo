@@ -281,6 +281,84 @@ func (s *Store) CreateAccountWithStatus(ctx context.Context, input model.Account
 	return s.GetAccount(ctx, id)
 }
 
+func (s *Store) ExportAccount(ctx context.Context, id int64) (model.AccountExportItem, error) {
+	var account model.AccountExportItem
+	err := s.db.QueryRowContext(ctx, `
+		SELECT name, cookie, note
+		FROM accounts
+		WHERE id = ?
+	`, id).Scan(&account.Name, &account.Cookie, &account.Note)
+	if err != nil {
+		return model.AccountExportItem{}, err
+	}
+	return account, nil
+}
+
+func (s *Store) ExportAccounts(ctx context.Context, ids []int64) ([]model.AccountExportItem, error) {
+	accounts := make([]model.AccountExportItem, 0, len(ids))
+	for _, id := range ids {
+		account, err := s.ExportAccount(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, account)
+	}
+	return accounts, nil
+}
+
+func (s *Store) ImportAccount(ctx context.Context, input model.AccountExportItem) (model.Account, error) {
+	accounts, err := s.ImportAccounts(ctx, []model.AccountExportItem{input})
+	if err != nil {
+		return model.Account{}, err
+	}
+	if len(accounts) == 0 {
+		return model.Account{}, sql.ErrNoRows
+	}
+	return accounts[0], nil
+}
+
+func (s *Store) ImportAccounts(ctx context.Context, inputs []model.AccountExportItem) ([]model.Account, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	now := nowText()
+	accounts := make([]model.Account, 0, len(inputs))
+	for _, input := range inputs {
+		name := strings.TrimSpace(input.Name)
+		cookie := strings.TrimSpace(input.Cookie)
+		note := strings.TrimSpace(input.Note)
+		status := accountStatus(cookie)
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO accounts (name, cookie, status, note, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, name, cookie, status, note, now, now)
+		if err != nil {
+			return nil, err
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, model.Account{
+			ID:            id,
+			Name:          name,
+			CookiePreview: maskCookie(cookie),
+			HasCookie:     cookie != "",
+			Status:        status,
+			Note:          note,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		})
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return accounts, nil
+}
+
 func (s *Store) GetAccountCookie(ctx context.Context, id int64) (model.Account, string, error) {
 	var account model.Account
 	var cookie string

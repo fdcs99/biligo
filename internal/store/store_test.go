@@ -157,6 +157,50 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	}
 }
 
+func TestImportExportAccount(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	created, err := store.ImportAccount(context.Background(), model.AccountExportItem{
+		Name:   "主账号",
+		Cookie: "SESSDATA=main; bili_jct=token",
+		Note:   "常用",
+	})
+	if err != nil {
+		t.Fatalf("ImportAccount: %v", err)
+	}
+	if created.Status != "configured" || !created.HasCookie || created.CookiePreview == "" {
+		t.Fatalf("imported account = %#v", created)
+	}
+
+	exported, err := store.ExportAccount(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("ExportAccount: %v", err)
+	}
+	if exported.Name != "主账号" || exported.Cookie != "SESSDATA=main; bili_jct=token" || exported.Note != "常用" {
+		t.Fatalf("unexpected exported account: %#v", exported)
+	}
+
+	second, err := store.ImportAccount(context.Background(), model.AccountExportItem{
+		Name:   "备用账号",
+		Cookie: "SESSDATA=backup",
+		Note:   "备用",
+	})
+	if err != nil {
+		t.Fatalf("ImportAccount second: %v", err)
+	}
+	exportedBatch, err := store.ExportAccounts(context.Background(), []int64{created.ID, second.ID})
+	if err != nil {
+		t.Fatalf("ExportAccounts: %v", err)
+	}
+	if len(exportedBatch) != 2 || exportedBatch[0].Name != "主账号" || exportedBatch[1].Cookie != "SESSDATA=backup" {
+		t.Fatalf("unexpected batch export: %#v", exportedBatch)
+	}
+}
+
 func TestMigrateCreatesCurrentTaskSchemaOnly(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {

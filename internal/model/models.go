@@ -65,6 +65,31 @@ type AccountInput struct {
 	Note   string `json:"note"`
 }
 
+type AccountExportItem struct {
+	Name   string `json:"name"`
+	Cookie string `json:"cookie"`
+	Note   string `json:"note"`
+}
+
+type AccountBatchExportInput struct {
+	AccountIDs []int64 `json:"accountIds"`
+}
+
+type AccountBatchExportResponse struct {
+	Version    int                 `json:"version"`
+	ExportedAt string              `json:"exportedAt"`
+	Accounts   []AccountExportItem `json:"accounts"`
+}
+
+type AccountImportInput struct {
+	Accounts []AccountExportItem `json:"accounts"`
+}
+
+type AccountImportResponse struct {
+	Imported int       `json:"imported"`
+	Accounts []Account `json:"accounts"`
+}
+
 type AccountCookieResponse struct {
 	AccountID     int64  `json:"accountId"`
 	Cookie        string `json:"cookie"`

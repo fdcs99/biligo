@@ -49,6 +49,8 @@ type Runtime struct {
 	Runner *runner.Manager
 }
 
+const maxAccountImportJSONBytes = 2 * 1024 * 1024
+
 type RouterOption func(*RouterOptions)
 
 func WithWebFS(webFS fs.FS) RouterOption {
@@ -118,6 +120,8 @@ func NewRuntime(store *store.Store, panel *panelauth.Manager, logger *applog.Log
 
 			protected.GET("/accounts", handler.listAccounts)
 			protected.POST("/accounts", handler.createAccount)
+			protected.POST("/accounts/export", handler.exportAccounts)
+			protected.POST("/accounts/import", handler.importAccounts)
 			protected.PUT("/accounts/:id", handler.updateAccount)
 			protected.GET("/accounts/:id/cookie", handler.accountCookie)
 			protected.POST("/accounts/:id/verify", handler.verifyAccount)
@@ -492,6 +496,40 @@ func (h *Handler) createAccount(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, account)
+}
+
+func (h *Handler) exportAccounts(c *gin.Context) {
+	var input model.AccountBatchExportInput
+	if !bindJSON(c, &input) || !validateAccountBatchExportInput(c, input) {
+		return
+	}
+	accounts, err := h.store.ExportAccounts(c.Request.Context(), input.AccountIDs)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, model.AccountBatchExportResponse{
+		Version:    1,
+		ExportedAt: time.Now().Format(time.RFC3339),
+		Accounts:   accounts,
+	})
+}
+
+func (h *Handler) importAccounts(c *gin.Context) {
+	accountInputs, ok := decodeAccountImportInput(c)
+	if !ok || !validateAccountImportInput(c, accountInputs) {
+		return
+	}
+	accounts, err := h.store.ImportAccounts(c.Request.Context(), accountInputs)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	response := model.AccountImportResponse{
+		Imported: len(accounts),
+		Accounts: accounts,
+	}
+	c.JSON(http.StatusCreated, response)
 }
 
 func (h *Handler) updateAccount(c *gin.Context) {
@@ -1159,6 +1197,76 @@ func bindJSON(c *gin.Context, target any) bool {
 	if err := c.ShouldBindJSON(target); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体不是有效 JSON"})
 		return false
+	}
+	return true
+}
+
+func decodeAccountImportInput(c *gin.Context) ([]model.AccountExportItem, bool) {
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, maxAccountImportJSONBytes+1))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "读取导入 JSON 失败"})
+		return nil, false
+	}
+	if len(body) > maxAccountImportJSONBytes {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "导入 JSON 不能超过 2MB"})
+		return nil, false
+	}
+	if strings.TrimSpace(string(body)) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "导入 JSON 不能为空"})
+		return nil, false
+	}
+
+	var accounts []model.AccountExportItem
+	if err := json.Unmarshal(body, &accounts); err == nil && accounts != nil {
+		return accounts, true
+	}
+	var input model.AccountImportInput
+	if err := json.Unmarshal(body, &input); err == nil && input.Accounts != nil {
+		return input.Accounts, true
+	}
+
+	c.JSON(http.StatusBadRequest, gin.H{"error": "账号导入 JSON 需要包含 accounts 数组"})
+	return nil, false
+}
+
+func validateAccountImportInput(c *gin.Context, accounts []model.AccountExportItem) bool {
+	if len(accounts) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "导入账号不能为空"})
+		return false
+	}
+	if len(accounts) > 200 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "一次最多导入 200 个账号"})
+		return false
+	}
+	for index, account := range accounts {
+		if strings.TrimSpace(account.Name) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("第 %d 个账号名称不能为空", index+1)})
+			return false
+		}
+	}
+	return true
+}
+
+func validateAccountBatchExportInput(c *gin.Context, input model.AccountBatchExportInput) bool {
+	if len(input.AccountIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请选择要导出的账号"})
+		return false
+	}
+	if len(input.AccountIDs) > 200 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "一次最多导出 200 个账号"})
+		return false
+	}
+	seen := make(map[int64]struct{}, len(input.AccountIDs))
+	for _, id := range input.AccountIDs {
+		if id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "账号 ID 必须是正整数"})
+			return false
+		}
+		if _, ok := seen[id]; ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "导出账号不能重复选择"})
+			return false
+		}
+		seen[id] = struct{}{}
 	}
 	return true
 }

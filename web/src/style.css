@@ -594,6 +594,79 @@ p {
   overflow-wrap: anywhere;
 }
 
+.account-export-dialog .el-dialog__body {
+  padding-top: 8px;
+}
+
+.account-export-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.account-export-list {
+  display: grid;
+  gap: 10px;
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.account-export-option {
+  align-items: flex-start;
+  width: 100%;
+  height: auto;
+  min-height: 72px;
+  min-width: 0;
+  margin-right: 0;
+  padding: 14px 16px;
+  border: 1px solid #ded8cd;
+  border-radius: 8px;
+  background: #ffffff;
+  white-space: normal;
+}
+
+.account-export-option .el-checkbox__input {
+  margin-top: 2px;
+}
+
+.account-export-option .el-checkbox__label {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 6px;
+  padding-left: 10px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.account-export-option span,
+.account-export-option small {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.account-export-option span {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.account-export-option small {
+  color: #7b7d86;
+  font-size: 13px;
+}
+
+.dialog-footer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .muted,
 .empty {
   color: #77736c;

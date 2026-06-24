@@ -121,6 +121,71 @@ func TestPanelAuthProtectsAPIs(t *testing.T) {
 	}
 }
 
+func TestAccountImportExportAPIs(t *testing.T) {
+	taskStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer taskStore.Close()
+
+	router := newTestRouter(taskStore)
+	token := loginTestPanel(t, router, "panel-secret")
+
+	body := bytes.NewBufferString(`{"accounts":[{"name":"主账号","cookie":"SESSDATA=main; bili_jct=token","note":"常用"},{"name":"备用账号","cookie":"SESSDATA=backup","note":"备用"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/import", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("import status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	var imported model.AccountImportResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &imported); err != nil {
+		t.Fatalf("decode import response: %v", err)
+	}
+	if imported.Imported != 2 || len(imported.Accounts) != 2 || imported.Accounts[0].Name != "主账号" {
+		t.Fatalf("unexpected import response: %#v", imported)
+	}
+
+	body = bytes.NewBufferString(fmt.Sprintf(`{"accountIds":[%d,%d]}`, imported.Accounts[0].ID, imported.Accounts[1].ID))
+	req = httptest.NewRequest(http.MethodPost, "/api/accounts/export", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("batch export status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	var batchExported model.AccountBatchExportResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &batchExported); err != nil {
+		t.Fatalf("decode batch export response: %v", err)
+	}
+	if batchExported.Version != 1 || len(batchExported.Accounts) != 2 || batchExported.Accounts[1].Name != "备用账号" {
+		t.Fatalf("unexpected batch export response: %#v", batchExported)
+	}
+
+	body = bytes.NewBufferString(`{"account":{"name":"单账号","cookie":"SESSDATA=single"}}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/accounts/import", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "accounts 数组") {
+		t.Fatalf("single import status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+
+	body = bytes.NewBufferString(`{"name":"单账号","cookie":"SESSDATA=single"}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/accounts/import", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "accounts 数组") {
+		t.Fatalf("root single import status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+}
+
 func TestTaskAPIsRejectConcurrentProxyWithoutGroup(t *testing.T) {
 	taskStore, err := store.Open(":memory:")
 	if err != nil {

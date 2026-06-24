@@ -318,6 +318,96 @@
 - `cookie` 为空时不会覆盖已有 Cookie，只更新名称和备注。
 - `cookie` 非空时会覆盖已有 Cookie，并将账号状态重置为 `configured`。
 
+### POST `/api/accounts/export`
+
+按选择的账号 ID 批量导出账号 JSON，包含完整 Cookie。
+
+请求：
+
+```json
+{
+  "accountIds": [1, 2]
+}
+```
+
+响应：
+
+```json
+{
+  "version": 1,
+  "exportedAt": "2026-06-24T12:00:00+08:00",
+  "accounts": [
+    {
+      "name": "主账号",
+      "cookie": "SESSDATA=xxx; bili_jct=yyy",
+      "note": "个人使用"
+    },
+    {
+      "name": "备用账号",
+      "cookie": "SESSDATA=zzz",
+      "note": "备用"
+    }
+  ]
+}
+```
+
+说明：
+
+- `accountIds` 至少选择 1 个账号，一次最多导出 200 个账号。
+- 批量导出 JSON 可直接用于 `POST /api/accounts/import`。
+- 该接口会返回账号完整 Cookie，只应在本机个人环境中备份。
+
+### POST `/api/accounts/import`
+
+从 JSON 批量导入账号。支持批量导出生成的标准对象格式，也兼容直接传入账号数组。
+
+请求：
+
+```json
+{
+  "accounts": [
+    {
+      "name": "主账号",
+      "cookie": "SESSDATA=xxx; bili_jct=yyy",
+      "note": "个人使用"
+    },
+    {
+      "name": "备用账号",
+      "cookie": "SESSDATA=zzz",
+      "note": "备用"
+    }
+  ]
+}
+```
+
+响应：`201 Created`
+
+```json
+{
+  "imported": 2,
+  "accounts": [
+    {
+      "id": 1,
+      "name": "主账号",
+      "cookiePreview": "SESSDA...abcdef",
+      "hasCookie": true,
+      "status": "configured",
+      "note": "个人使用",
+      "createdAt": "2026-06-24T12:00:00+08:00",
+      "updatedAt": "2026-06-24T12:00:00+08:00"
+    }
+  ]
+}
+```
+
+说明：
+
+- `accounts` 至少包含 1 个账号，一次最多导入 200 个账号。
+- 每个账号 `name` 必填；`cookie` 可为空。
+- 不支持单账号 JSON 对象格式，例如 `{ "account": {...} }` 或直接传入账号字段对象。
+- 导入会创建新账号，不会覆盖已有账号。
+- 导入后账号状态按 Cookie 重新计算：有 Cookie 为 `configured`，无 Cookie 为 `missing_cookie`。
+
 ### GET `/api/accounts/{id}/cookie`
 
 获取指定账号保存的完整 Cookie，用于本地复制。该接口会返回敏感信息，前端列表默认仍只展示脱敏后的 `cookiePreview`。
