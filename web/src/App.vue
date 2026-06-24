@@ -150,6 +150,7 @@ const taskForm = reactive<TaskInput>({
   accountId: 0,
   proxyGroupId: 0,
   proxyMode: 'round_robin',
+  superMode: false,
   projectId: 0,
   projectName: '',
   screenId: 0,
@@ -900,6 +901,7 @@ function resetTaskForm() {
     accountId: accounts.value[0]?.id ?? 0,
     proxyGroupId: 0,
     proxyMode: 'round_robin',
+    superMode: false,
     projectId: 0,
     projectName: '',
     screenId: 0,
@@ -940,6 +942,7 @@ function editTask(task: Task) {
     accountId: task.accountId,
     proxyGroupId: task.proxyGroupId || 0,
     proxyMode: task.proxyMode || 'round_robin',
+    superMode: Boolean(task.superMode),
     projectId: task.projectId,
     projectName: task.projectName,
     screenId: task.screenId,
@@ -1062,6 +1065,7 @@ function normalizeTaskModeFields() {
   if (!hasRushTaskSection.value) {
     taskForm.proxyGroupId = 0
     taskForm.proxyMode = 'round_robin'
+    taskForm.superMode = false
   }
   if (Number(taskForm.proxyGroupId || 0) <= 0) {
     taskForm.proxyMode = 'round_robin'
@@ -2740,6 +2744,19 @@ onUnmounted(() => {
                 </el-form-item>
               </el-col>
             </template>
+            <el-col v-if="hasRushTaskSection" :xs="24" :sm="12">
+              <el-form-item>
+                <template #label>
+                  <el-tooltip
+                    placement="top"
+                    content="开启后，遇到 412 或 3 会自动切换域名，尝试降低 412 出现概率。"
+                  >
+                    <span class="tooltip-label">SuperMode</span>
+                  </el-tooltip>
+                </template>
+                <el-switch v-model="taskForm.superMode" active-text="开启" inactive-text="关闭" />
+              </el-form-item>
+            </el-col>
             <el-col v-if="taskForm.taskMode === 'rush'" :xs="24" :sm="12">
               <el-form-item label="时间同步策略">
                 <el-select v-model="taskForm.timeSyncStrategy">

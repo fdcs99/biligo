@@ -100,6 +100,17 @@ func TestCreateV2StatusMessageHints(t *testing.T) {
 			want: "状态码：100009，提示信息：库存不足",
 		},
 		{
+			name: "nested data risk code",
+			response: map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"code":    412,
+					"message": "risk",
+				},
+			},
+			want: "状态码：412，提示信息：触发风控",
+		},
+		{
 			name: "unknown keeps api message",
 			response: map[string]any{
 				"code": 123456,
@@ -111,7 +122,7 @@ func TestCreateV2StatusMessageHints(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			code, _ := optionalCode(tt.response)
+			code := createV2Code(tt.response)
 			got := createV2StatusMessage(tt.response, code)
 			if !strings.Contains(got, tt.want) {
 				t.Fatalf("createV2StatusMessage() = %q, want contains %q", got, tt.want)
@@ -333,6 +344,26 @@ func TestWarmupShowKeepsConnectionForNextRequest(t *testing.T) {
 	}
 	if newConnections.Load() != 1 {
 		t.Fatalf("new connections = %d, want 1", newConnections.Load())
+	}
+}
+
+func TestDoJSONReturnsHTTPStatusError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusPreconditionFailed)
+	}))
+	defer server.Close()
+
+	client := NewClientWithBaseURL(server.Client(), server.URL)
+	var response map[string]any
+	err := client.doJSON(context.Background(), http.MethodPost, server.URL+"/api/ticket/order/createV2", nil, "", nil, &response)
+	if err == nil {
+		t.Fatal("doJSON returned nil error, want HTTP status error")
+	}
+	if got := HTTPStatusCode(err); got != http.StatusPreconditionFailed {
+		t.Fatalf("HTTPStatusCode() = %d, want %d", got, http.StatusPreconditionFailed)
+	}
+	if got := err.Error(); got != "Bilibili 接口返回状态码 412" {
+		t.Fatalf("error = %q, want HTTP status message", got)
 	}
 }
 

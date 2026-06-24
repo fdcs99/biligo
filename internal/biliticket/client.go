@@ -72,6 +72,22 @@ type OrderCreateResult struct {
 	Raw      map[string]any
 }
 
+type HTTPStatusError struct {
+	StatusCode int
+}
+
+func (e HTTPStatusError) Error() string {
+	return fmt.Sprintf("Bilibili 接口返回状态码 %d", e.StatusCode)
+}
+
+func HTTPStatusCode(err error) int {
+	var statusErr HTTPStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode
+	}
+	return 0
+}
+
 type PayParamResult struct {
 	CodeURL        string
 	QRImageDataURL string
@@ -138,6 +154,26 @@ func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 	return &Client{
 		httpClient:   httpClient,
 		showBaseURL:  c.showBaseURL,
+		mallBaseURL:  c.mallBaseURL,
+		apiBaseURL:   c.apiBaseURL,
+		createTimeMs: c.createTimeMs,
+		cTokenWindow: c.cTokenWindow,
+	}
+}
+
+func (c *Client) WithShowBaseURL(baseURL string) *Client {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return c
+	}
+	if c == nil {
+		client := NewClient(nil)
+		client.showBaseURL = baseURL
+		return client
+	}
+	return &Client{
+		httpClient:   c.httpClient,
+		showBaseURL:  baseURL,
 		mallBaseURL:  c.mallBaseURL,
 		apiBaseURL:   c.apiBaseURL,
 		createTimeMs: c.createTimeMs,
@@ -401,8 +437,8 @@ func (c *Client) CreateOrder(ctx context.Context, task model.Task, cookie string
 	if err := c.doJSON(ctx, http.MethodPost, endpoint, payload, cookie, nil, &response); err != nil {
 		return OrderCreateResult{}, err
 	}
-	code, _ := optionalCode(response)
-	message := firstNonEmpty(stringValue(response["msg"]), stringValue(response["message"]))
+	code := createV2Code(response)
+	message := createV2Message(response)
 	data, _ := mapValue(response["data"])
 	result := OrderCreateResult{
 		Code:     code,
@@ -685,7 +721,7 @@ func (c *Client) doJSON(ctx context.Context, method string, endpoint string, bod
 	defer drainAndClose(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("Bilibili 接口返回状态码 %d", resp.StatusCode)
+		return HTTPStatusError{StatusCode: resp.StatusCode}
 	}
 
 	decoder := json.NewDecoder(resp.Body)
@@ -984,7 +1020,7 @@ func isCreateSuccess(response map[string]any, code int64) bool {
 	if code == 100048 || code == 100079 {
 		return true
 	}
-	message := firstNonEmpty(stringValue(response["msg"]), stringValue(response["message"]))
+	message := createV2Message(response)
 	return code == 0 && !IsDefaultBBRMessage(message)
 }
 
@@ -1002,17 +1038,45 @@ func apiError(response map[string]any, fallback string) error {
 }
 
 func createV2Error(response map[string]any) error {
-	code, _ := optionalCode(response)
-	return errors.New(createV2StatusMessage(response, code))
+	return errors.New(createV2StatusMessage(response, createV2Code(response)))
 }
 
 func createV2StatusMessage(response map[string]any, code int64) string {
-	apiMessage := firstNonEmpty(stringValue(response["msg"]), stringValue(response["message"]))
+	apiMessage := createV2Message(response)
 	message := createV2StatusHint(response, code, apiMessage)
 	if message == "" {
 		message = firstNonEmpty(apiMessage, "创建订单失败")
 	}
 	return fmt.Sprintf("状态码：%d，提示信息：%s", code, message)
+}
+
+func createV2Code(response map[string]any) int64 {
+	topCode, hasTopCode := optionalCode(response)
+	data, _ := mapValue(response["data"])
+	dataCode, hasDataCode := optionalCode(data)
+	if hasTopCode && topCode != 0 {
+		return topCode
+	}
+	if hasDataCode && dataCode != 0 {
+		return dataCode
+	}
+	if hasTopCode {
+		return topCode
+	}
+	if hasDataCode {
+		return dataCode
+	}
+	return 0
+}
+
+func createV2Message(response map[string]any) string {
+	data, _ := mapValue(response["data"])
+	return firstNonEmpty(
+		stringValue(response["msg"]),
+		stringValue(response["message"]),
+		stringValue(data["msg"]),
+		stringValue(data["message"]),
+	)
 }
 
 func createV2StatusHint(response map[string]any, code int64, apiMessage string) string {

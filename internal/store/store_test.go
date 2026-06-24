@@ -76,6 +76,9 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	if task.RushDurationSeconds != model.DefaultRushDurationSeconds {
 		t.Fatalf("RushDurationSeconds = %d, want %d", task.RushDurationSeconds, model.DefaultRushDurationSeconds)
 	}
+	if task.SuperMode {
+		t.Fatal("SuperMode = true, want default false")
+	}
 	if task.PollIntervalMillis != 200 {
 		t.Fatalf("PollIntervalMillis = %d, want 200", task.PollIntervalMillis)
 	}
@@ -98,6 +101,7 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 		SaleStatus:                task.SaleStatus,
 		LinkID:                    task.LinkID,
 		IsHotProject:              task.IsHotProject,
+		SuperMode:                 true,
 		TaskMode:                  model.TaskModeHybrid,
 		DurationMode:              model.DurationModeUnlimited,
 		SelectedTickets:           task.SelectedTickets,
@@ -122,6 +126,9 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 	}
 	if task.TaskMode != model.TaskModeHybrid || task.RushDurationSeconds != 45 {
 		t.Fatalf("updated task mode/duration = %q/%d", task.TaskMode, task.RushDurationSeconds)
+	}
+	if !task.SuperMode {
+		t.Fatal("updated SuperMode = false, want true")
 	}
 	if task.RushPollIntervalMillis != 120 || task.RestockPollIntervalMillis != 450 {
 		t.Fatalf("updated stage poll intervals = %d/%d, want 120/450", task.RushPollIntervalMillis, task.RestockPollIntervalMillis)
@@ -171,6 +178,7 @@ func TestMigrateCreatesCurrentTaskSchemaOnly(t *testing.T) {
 		"project_id",
 		"project_name",
 		"proxy_mode",
+		"super_mode",
 		"screen_id",
 		"sku_id",
 		"ticket_display",

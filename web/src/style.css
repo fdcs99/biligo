@@ -456,6 +456,11 @@ p {
   line-height: 1.45;
 }
 
+.tooltip-label {
+  cursor: help;
+  border-bottom: 1px dotted currentColor;
+}
+
 .ticket-detail-grid {
   display: grid;
   gap: 8px;

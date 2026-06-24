@@ -509,6 +509,7 @@
     "proxyGroupId": 0,
     "proxyGroupName": "",
     "proxyMode": "round_robin",
+    "superMode": false,
     "projectId": 123456,
     "projectName": "演出名称",
     "screenId": 1001,
@@ -592,6 +593,7 @@
   "accountId": 1,
   "proxyGroupId": 0,
   "proxyMode": "round_robin",
+  "superMode": false,
   "projectId": 123456,
   "projectName": "演出名称",
   "screenId": 1001,
@@ -652,6 +654,7 @@
 - `taskMode` 可选值为 `rush`、`restock` 或 `rush_restock`，为空时默认 `rush`。
 - `proxyGroupId` 仅对 `rush` 和 `rush_restock` 生效；`taskMode=restock` 时后端会自动清空代理组。
 - `proxyMode` 可选值为 `round_robin` 或 `concurrent`，为空时默认 `round_robin`；`concurrent` 需要选择代理组。
+- `superMode` 仅对 `rush` 和 `rush_restock` 的抢票阶段生效；开启后订单请求会在 `show.bilibili.com`、`www.bilibili.cn`、`www.biligo.com` 三个 base 域名间切换，`createV2` 返回 `412` 或 `3` 时立即切到下一个域名并重新订单准备。
 - `durationMode` 可选值为 `limited` 或 `unlimited`，为空时默认 `limited`。
 - `rushDurationSeconds <= 0` 时后端默认修正为 `600`；`taskMode=rush_restock` 时该值表示抢票阶段第一次订单请求发出后多少秒再切换回流捡漏。
 - `taskMode=restock` 或 `taskMode=rush_restock` 且 `durationMode=limited` 时，下发前需要设置合法 `endAt`；`durationMode=unlimited` 时不需要 `endAt`。
@@ -698,6 +701,8 @@
 - `rush_restock`：后端会先按抢票模式同步时间、等待起售、校验 `hot_project` 并预热连接；到达起售时间后直接尝试订单流程。抢票段按 `rushPollIntervalMillis` 重试，截止时间为“抢票阶段第一次订单请求发出时间 + `rushDurationSeconds`”，使用同步后的时间 offset 判断。抢票段成功进入 `waiting_payment` 或检测到重复订单时任务结束；抢票窗口结束仍未成功时写入“抢票窗口结束，切换回流捡漏。”日志，并进入回流捡漏流程。切换后的回流段不再重新时间同步或等待开票，按 `restockPollIntervalMillis` 检测和重试，`durationMode/endAt` 只作用于回流段。
 
 订单阶段采用“1 次 `prepare` 搭配最多 4 次 `createV2`”的重试策略：订单准备成功后，会在同一份准备结果下连续尝试创建订单，任意一次成功即进入支付参数获取；4 次 `createV2` 均失败后才按当前阶段重试间隔等待并重新请求 `prepare`。若 `createV2` 返回 `100034` 且携带新金额，后端会先更新任务金额，再立即重新请求一次 `prepare`，不继续复用旧的准备结果。回流捡漏命中票种后也遵循同一策略，4 次创建订单均失败才回到票种检测列表。纯抢票和纯回流模式继续使用 `pollIntervalMillis`；抢票+回流捡漏模式的抢票阶段使用 `rushPollIntervalMillis`，回流阶段使用 `restockPollIntervalMillis`。成功后进入 `waiting_payment`。
+
+若任务开启 `superMode`，抢票阶段的订单准备、创建订单和获取支付参数会使用当前 SuperMode base 域名；当 `createV2` 返回 `412` 或 `3` 时，后端会按 `show.bilibili.com`、`www.bilibili.cn`、`www.biligo.com` 顺序循环切换到下一个 base 域名，并重新进入订单准备流程。
 
 若任务设置了代理组：
 

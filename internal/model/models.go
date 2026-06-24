@@ -291,6 +291,7 @@ type Task struct {
 	ProxyGroupID              int64          `json:"proxyGroupId"`
 	ProxyGroupName            string         `json:"proxyGroupName"`
 	ProxyMode                 string         `json:"proxyMode"`
+	SuperMode                 bool           `json:"superMode"`
 	ProjectID                 int64          `json:"projectId"`
 	ProjectName               string         `json:"projectName"`
 	ScreenID                  int64          `json:"screenId"`
@@ -338,6 +339,7 @@ type TaskInput struct {
 	AccountID                 int64          `json:"accountId"`
 	ProxyGroupID              int64          `json:"proxyGroupId"`
 	ProxyMode                 string         `json:"proxyMode"`
+	SuperMode                 bool           `json:"superMode"`
 	ProjectID                 int64          `json:"projectId"`
 	ProjectName               string         `json:"projectName"`
 	ScreenID                  int64          `json:"screenId"`

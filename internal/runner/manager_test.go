@@ -913,13 +913,271 @@ func TestRunnerWaitsBeforeRetryingCreate412WithoutProxy(t *testing.T) {
 	}
 }
 
+func TestRunnerSuperModeSwitchesBaseURLOnCreateRiskCode(t *testing.T) {
+	var firstPrepareCalls atomic.Int32
+	var firstCreateCalls atomic.Int32
+	var secondPrepareCalls atomic.Int32
+	var secondCreateCalls atomic.Int32
+	firstServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			firstPrepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token-first"}})
+		case "/api/ticket/order/createV2":
+			firstCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 412, "message": "risk"})
+		default:
+			t.Fatalf("unexpected first supermode path: %s", r.URL.Path)
+		}
+	}))
+	defer firstServer.Close()
+	secondServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			secondPrepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token-second"}})
+		case "/api/ticket/order/createV2":
+			secondCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-SUPER", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-SUPER"}})
+		default:
+			t.Fatalf("unexpected second supermode path: %s", r.URL.Path)
+		}
+	}))
+	defer secondServer.Close()
+	thirdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("third supermode server should not be used: %s", r.URL.Path)
+	}))
+	defer thirdServer.Close()
+
+	originalBaseURLs := superModeBaseURLs
+	superModeBaseURLs = []string{firstServer.URL, secondServer.URL, thirdServer.URL}
+	t.Cleanup(func() {
+		superModeBaseURLs = originalBaseURLs
+	})
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+	task = updateTaskSuperMode(t, taskStore, task, true)
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(firstServer.Client(), firstServer.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-SUPER" {
+		t.Fatalf("OrderID = %q, want ORDER-SUPER", updated.OrderID)
+	}
+	if firstPrepareCalls.Load() != 1 || firstCreateCalls.Load() != 1 {
+		t.Fatalf("first server calls prepare/create = %d/%d, want 1/1", firstPrepareCalls.Load(), firstCreateCalls.Load())
+	}
+	if secondPrepareCalls.Load() != 1 || secondCreateCalls.Load() != 1 {
+		t.Fatalf("second server calls prepare/create = %d/%d, want 1/1", secondPrepareCalls.Load(), secondCreateCalls.Load())
+	}
+	logs, err := taskStore.ListTaskLogs(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("ListTaskLogs: %v", err)
+	}
+	foundSwitchLog := false
+	for _, log := range logs {
+		if strings.Contains(log.Message, "SuperMode 检测到 createV2 返回 412") &&
+			strings.Contains(log.Message, "已将订单域名从") &&
+			strings.Contains(log.Message, "重新准备订单") {
+			foundSwitchLog = true
+			break
+		}
+	}
+	if !foundSwitchLog {
+		t.Fatalf("supermode switch log not found: %#v", logs)
+	}
+}
+
+func TestRunnerSuperModeSwitchesBaseURLOnCreateHTTP412(t *testing.T) {
+	var firstPrepareCalls atomic.Int32
+	var firstCreateCalls atomic.Int32
+	var secondPrepareCalls atomic.Int32
+	var secondCreateCalls atomic.Int32
+	firstServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			firstPrepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token-first"}})
+		case "/api/ticket/order/createV2":
+			firstCreateCalls.Add(1)
+			w.WriteHeader(http.StatusPreconditionFailed)
+			_, _ = w.Write([]byte(`{"code":412,"message":"risk"}`))
+		default:
+			t.Fatalf("unexpected first supermode path: %s", r.URL.Path)
+		}
+	}))
+	defer firstServer.Close()
+	secondServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			secondPrepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token-second"}})
+		case "/api/ticket/order/createV2":
+			secondCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-HTTP-412", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-HTTP-412"}})
+		default:
+			t.Fatalf("unexpected second supermode path: %s", r.URL.Path)
+		}
+	}))
+	defer secondServer.Close()
+	thirdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("third supermode server should not be used: %s", r.URL.Path)
+	}))
+	defer thirdServer.Close()
+
+	originalBaseURLs := superModeBaseURLs
+	superModeBaseURLs = []string{firstServer.URL, secondServer.URL, thirdServer.URL}
+	t.Cleanup(func() {
+		superModeBaseURLs = originalBaseURLs
+	})
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+	task = updateTaskSuperMode(t, taskStore, task, true)
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(firstServer.Client(), firstServer.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-HTTP-412" {
+		t.Fatalf("OrderID = %q, want ORDER-HTTP-412", updated.OrderID)
+	}
+	if firstPrepareCalls.Load() != 1 || firstCreateCalls.Load() != 1 {
+		t.Fatalf("first server calls prepare/create = %d/%d, want 1/1", firstPrepareCalls.Load(), firstCreateCalls.Load())
+	}
+	if secondPrepareCalls.Load() != 1 || secondCreateCalls.Load() != 1 {
+		t.Fatalf("second server calls prepare/create = %d/%d, want 1/1", secondPrepareCalls.Load(), secondCreateCalls.Load())
+	}
+	logs, err := taskStore.ListTaskLogs(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("ListTaskLogs: %v", err)
+	}
+	foundSwitchLog := false
+	for _, log := range logs {
+		if strings.Contains(log.Message, "SuperMode 检测到 createV2 返回 HTTP 412") &&
+			strings.Contains(log.Message, "已将订单域名从") &&
+			strings.Contains(log.Message, "重新准备订单") {
+			foundSwitchLog = true
+			break
+		}
+	}
+	if !foundSwitchLog {
+		t.Fatalf("supermode HTTP 412 switch log not found: %#v", logs)
+	}
+}
+
+func TestRunnerSuperModeSwitchesBaseURLOnCreateBodyRiskCode(t *testing.T) {
+	var firstPrepareCalls atomic.Int32
+	var firstCreateCalls atomic.Int32
+	var secondPrepareCalls atomic.Int32
+	var secondCreateCalls atomic.Int32
+	firstServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			firstPrepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token-first"}})
+		case "/api/ticket/order/createV2":
+			firstCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"code":    412,
+					"message": "risk",
+				},
+			})
+		default:
+			t.Fatalf("unexpected first supermode path: %s", r.URL.Path)
+		}
+	}))
+	defer firstServer.Close()
+	secondServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			secondPrepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token-second"}})
+		case "/api/ticket/order/createV2":
+			secondCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-BODY-412", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-BODY-412"}})
+		default:
+			t.Fatalf("unexpected second supermode path: %s", r.URL.Path)
+		}
+	}))
+	defer secondServer.Close()
+	thirdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("third supermode server should not be used: %s", r.URL.Path)
+	}))
+	defer thirdServer.Close()
+
+	originalBaseURLs := superModeBaseURLs
+	superModeBaseURLs = []string{firstServer.URL, secondServer.URL, thirdServer.URL}
+	t.Cleanup(func() {
+		superModeBaseURLs = originalBaseURLs
+	})
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+	task = updateTaskSuperMode(t, taskStore, task, true)
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(firstServer.Client(), firstServer.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-BODY-412" {
+		t.Fatalf("OrderID = %q, want ORDER-BODY-412", updated.OrderID)
+	}
+	if firstPrepareCalls.Load() != 1 || firstCreateCalls.Load() != 1 {
+		t.Fatalf("first server calls prepare/create = %d/%d, want 1/1", firstPrepareCalls.Load(), firstCreateCalls.Load())
+	}
+	if secondPrepareCalls.Load() != 1 || secondCreateCalls.Load() != 1 {
+		t.Fatalf("second server calls prepare/create = %d/%d, want 1/1", secondPrepareCalls.Load(), secondCreateCalls.Load())
+	}
+	logs, err := taskStore.ListTaskLogs(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("ListTaskLogs: %v", err)
+	}
+	foundSwitchLog := false
+	for _, log := range logs {
+		if strings.Contains(log.Message, "SuperMode 检测到 createV2 返回 412") &&
+			strings.Contains(log.Message, "已将订单域名从") &&
+			strings.Contains(log.Message, "重新准备订单") {
+			foundSwitchLog = true
+			break
+		}
+	}
+	if !foundSwitchLog {
+		t.Fatalf("supermode body 412 switch log not found: %#v", logs)
+	}
+}
+
 func TestRunnerSwitchesProxyOnCreateV2RiskCodes(t *testing.T) {
 	tests := []struct {
-		name string
-		code int
+		name       string
+		code       int
+		httpStatus int
 	}{
 		{name: "code 412", code: 412},
 		{name: "code 3", code: 3},
+		{name: "http status 412", httpStatus: http.StatusPreconditionFailed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -932,6 +1190,11 @@ func TestRunnerSwitchesProxyOnCreateV2RiskCodes(t *testing.T) {
 					writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
 				case "/api/ticket/order/createV2":
 					firstCreateCalls.Add(1)
+					if tt.httpStatus != 0 {
+						w.WriteHeader(tt.httpStatus)
+						_, _ = w.Write([]byte(`{"code":412,"message":"risk"}`))
+						return
+					}
 					writeRunnerJSON(t, w, map[string]any{"code": tt.code, "message": "risk"})
 				default:
 					t.Fatalf("unexpected first proxy path: %s", r.URL.Path)
@@ -1711,6 +1974,50 @@ func updateTaskProxyGroup(t *testing.T, taskStore *store.Store, task model.Task,
 	return updateTaskProxyGroupWithMode(t, taskStore, task, proxyGroupID, model.ProxyModeRoundRobin)
 }
 
+func updateTaskSuperMode(t *testing.T, taskStore *store.Store, task model.Task, superMode bool) model.Task {
+	t.Helper()
+	updated, err := taskStore.UpdateTask(context.Background(), task.ID, model.TaskInput{
+		Name:                      task.Name,
+		AccountID:                 task.AccountID,
+		ProxyGroupID:              task.ProxyGroupID,
+		ProxyMode:                 task.ProxyMode,
+		SuperMode:                 superMode,
+		ProjectID:                 task.ProjectID,
+		ProjectName:               task.ProjectName,
+		ScreenID:                  task.ScreenID,
+		SKUID:                     task.SKUID,
+		SessionName:               task.SessionName,
+		TicketLevel:               task.TicketLevel,
+		TicketDisplay:             task.TicketDisplay,
+		TicketPrice:               task.TicketPrice,
+		SaleStart:                 task.SaleStart,
+		SaleStatus:                task.SaleStatus,
+		LinkID:                    task.LinkID,
+		IsHotProject:              task.IsHotProject,
+		TaskMode:                  task.TaskMode,
+		DurationMode:              task.DurationMode,
+		SelectedTickets:           task.SelectedTickets,
+		OrderType:                 task.OrderType,
+		PayMoney:                  task.PayMoney,
+		BuyerInfo:                 task.BuyerInfo,
+		Buyer:                     task.Buyer,
+		Tel:                       task.Tel,
+		DeliverInfo:               task.DeliverInfo,
+		Phone:                     task.Phone,
+		TimeSyncStrategy:          task.TimeSyncStrategy,
+		Quantity:                  task.Quantity,
+		StartAt:                   task.StartAt,
+		EndAt:                     task.EndAt,
+		PollIntervalMillis:        task.PollIntervalMillis,
+		RushPollIntervalMillis:    task.RushPollIntervalMillis,
+		RestockPollIntervalMillis: task.RestockPollIntervalMillis,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask super mode: %v", err)
+	}
+	return updated
+}
+
 func updateTaskProxyGroupWithMode(t *testing.T, taskStore *store.Store, task model.Task, proxyGroupID int64, proxyMode string) model.Task {
 	t.Helper()
 	updated, err := taskStore.UpdateTask(context.Background(), task.ID, model.TaskInput{
@@ -1718,6 +2025,7 @@ func updateTaskProxyGroupWithMode(t *testing.T, taskStore *store.Store, task mod
 		AccountID:                 task.AccountID,
 		ProxyGroupID:              proxyGroupID,
 		ProxyMode:                 proxyMode,
+		SuperMode:                 task.SuperMode,
 		ProjectID:                 task.ProjectID,
 		ProjectName:               task.ProjectName,
 		ScreenID:                  task.ScreenID,

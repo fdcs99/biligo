@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +51,12 @@ const (
 
 var pullKuaidailiDPS = proxynet.PullKuaidailiDPS
 var noProxyCreate412RetryWait = 3 * time.Second
+var superModeBaseURLs = []string{
+	"https://show.bilibili.com",
+	"https://www.bilibili.cn",
+	"https://www.biligo.com",
+	"http://me.bilibili.cc",
+}
 
 func NewManager(store *store.Store, ticket *biliticket.Client, hub *events.Hub) *Manager {
 	return NewManagerWithTimeSync(store, ticket, hub, timesync.NewClient(nil))
@@ -265,10 +272,10 @@ func (m *Manager) runRush(ctx context.Context, taskID int64, cookie string, task
 		return nowWithOffset(timeOffset).After(endAt)
 	}
 	if isConcurrentProxyTask(task) {
-		m.runConcurrentOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded, nil, "failed", "已超过任务结束时间，停止检测。", "warn", "已超过任务结束时间，停止获取支付参数。", proxyRuntime)
+		m.runConcurrentOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded, nil, "failed", "已超过任务结束时间，停止检测。", "warn", "已超过任务结束时间，停止获取支付参数。", proxyRuntime, newSuperModeRuntime(task))
 		return
 	}
-	m.runOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded, proxyRuntime)
+	m.runOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded, proxyRuntime, newSuperModeRuntime(task))
 }
 
 func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, task model.Task) {
@@ -321,9 +328,9 @@ func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, ta
 	}
 	var finished bool
 	if isConcurrentProxyTask(task) {
-		finished = m.runConcurrentOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded, markRushStarted, "running", switchMessage, "info", switchMessage, proxyRuntime)
+		finished = m.runConcurrentOrderFlow(ctx, taskID, cookie, interval, deadlineExceeded, markRushStarted, "running", switchMessage, "info", switchMessage, proxyRuntime, newSuperModeRuntime(task))
 	} else {
-		finished = m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, markRushStarted, "running", switchMessage, "info", switchMessage, proxyRuntime)
+		finished = m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, markRushStarted, "running", switchMessage, "info", switchMessage, proxyRuntime, newSuperModeRuntime(task))
 	}
 	if finished {
 		return
@@ -403,11 +410,11 @@ func (m *Manager) runRestock(ctx context.Context, taskID int64, cookie string, t
 	}
 }
 
-func (m *Manager) runOrderFlow(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, proxyRuntime *taskProxyRuntime) bool {
-	return m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, nil, "failed", "已超过任务结束时间，停止检测。", "warn", "已超过任务结束时间，停止获取支付参数。", proxyRuntime)
+func (m *Manager) runOrderFlow(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, proxyRuntime *taskProxyRuntime, superRuntime *superModeRuntime) bool {
+	return m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, nil, "failed", "已超过任务结束时间，停止检测。", "warn", "已超过任务结束时间，停止获取支付参数。", proxyRuntime, superRuntime)
 }
 
-func (m *Manager) runOrderFlowWithDeadline(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, beforeAttempt func(), deadlineStatus string, deadlineMessage string, deadlineLevel string, payParamDeadlineMessage string, proxyRuntime *taskProxyRuntime) bool {
+func (m *Manager) runOrderFlowWithDeadline(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, beforeAttempt func(), deadlineStatus string, deadlineMessage string, deadlineLevel string, payParamDeadlineMessage string, proxyRuntime *taskProxyRuntime, superRuntime *superModeRuntime) bool {
 orderLoop:
 	for {
 		if ctx.Err() != nil {
@@ -427,7 +434,7 @@ orderLoop:
 		if beforeAttempt != nil {
 			beforeAttempt()
 		}
-		client := m.ticketClient(proxyRuntime)
+		client := m.orderTicketClient(proxyRuntime, superRuntime)
 		prepared, err := client.PrepareOrder(ctx, latestTask, cookie)
 		if err != nil {
 			if m.switchProxyOnRequestError(ctx, taskID, proxyRuntime, err) {
@@ -462,12 +469,16 @@ orderLoop:
 					m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
 					continue orderLoop
 				}
+				if switched, reason, from, to := switchSuperModeRuntime(superRuntime, result, createErr); switched {
+					m.setRuntime(taskID, "running", superModeSwitchMessage(reason, from, to), "warn")
+					continue orderLoop
+				}
 				if shouldSwitchProxyForCreateError(result, createErr) {
 					if m.switchProxy(ctx, taskID, proxyRuntime, "创建订单触发代理切换："+createErr.Error()) {
 						continue orderLoop
 					}
 					createFailedMessage = "创建订单失败：" + createErr.Error()
-					createRetryInterval = createErrorRetryInterval(result, proxyRuntime, interval)
+					createRetryInterval = createErrorRetryInterval(result, createErr, proxyRuntime, interval)
 					break
 				}
 				createFailedMessage = "创建订单失败：" + createErr.Error()
@@ -494,7 +505,7 @@ orderLoop:
 			continue
 		}
 
-		payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, deadlineStatus, payParamDeadlineMessage, deadlineLevel, proxyRuntime)
+		payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, deadlineStatus, payParamDeadlineMessage, deadlineLevel, proxyRuntime, superRuntime)
 		if !ok {
 			return false
 		}
@@ -520,9 +531,9 @@ func (m *Manager) completeOrderSuccess(taskID int64, orderID string, payParam bi
 	return task, true
 }
 
-func (m *Manager) runConcurrentOrderFlow(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, beforeAttempt func(), deadlineStatus string, deadlineMessage string, deadlineLevel string, payParamDeadlineMessage string, proxyRuntime *taskProxyRuntime) bool {
+func (m *Manager) runConcurrentOrderFlow(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, beforeAttempt func(), deadlineStatus string, deadlineMessage string, deadlineLevel string, payParamDeadlineMessage string, proxyRuntime *taskProxyRuntime, superRuntime *superModeRuntime) bool {
 	if proxyRuntime == nil {
-		return m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, beforeAttempt, deadlineStatus, deadlineMessage, deadlineLevel, payParamDeadlineMessage, nil)
+		return m.runOrderFlowWithDeadline(ctx, taskID, cookie, interval, deadlineExceeded, beforeAttempt, deadlineStatus, deadlineMessage, deadlineLevel, payParamDeadlineMessage, nil, superRuntime)
 	}
 	if err := proxyRuntime.ensureReady(ctx); err != nil {
 		m.setRuntime(taskID, "failed", "代理组无可用节点："+err.Error(), "error")
@@ -589,7 +600,7 @@ func (m *Manager) runConcurrentOrderFlow(ctx context.Context, taskID int64, cook
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			m.runConcurrentProxyWorker(workerCtx, taskID, cookie, interval, deadlineExceeded, beforeAttempt, deadlineStatus, deadlineMessage, deadlineLevel, payParamDeadlineMessage, runtime, terminal.Load, setWorkerRuntime, finishTerminal, finishSuccess)
+			m.runConcurrentProxyWorker(workerCtx, taskID, cookie, interval, deadlineExceeded, beforeAttempt, deadlineStatus, deadlineMessage, deadlineLevel, payParamDeadlineMessage, runtime, superRuntime.clone(), terminal.Load, setWorkerRuntime, finishTerminal, finishSuccess)
 		}()
 	}
 
@@ -630,7 +641,7 @@ func (m *Manager) fixedProxyRuntimeForNode(taskID int64, group model.ProxyGroup,
 	}, nil
 }
 
-func (m *Manager) runConcurrentProxyWorker(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, beforeAttempt func(), deadlineStatus string, deadlineMessage string, deadlineLevel string, payParamDeadlineMessage string, proxyRuntime *taskProxyRuntime, terminalReached func() bool, setWorkerRuntime func(string, string, string) bool, finishTerminal func(string, string, string), finishSuccess func(string, biliticket.PayParamResult, string)) {
+func (m *Manager) runConcurrentProxyWorker(ctx context.Context, taskID int64, cookie string, interval time.Duration, deadlineExceeded func() bool, beforeAttempt func(), deadlineStatus string, deadlineMessage string, deadlineLevel string, payParamDeadlineMessage string, proxyRuntime *taskProxyRuntime, superRuntime *superModeRuntime, terminalReached func() bool, setWorkerRuntime func(string, string, string) bool, finishTerminal func(string, string, string), finishSuccess func(string, biliticket.PayParamResult, string)) {
 	node := proxyRuntime.currentNode()
 	prefix := "代理节点 " + proxyNodeLabel(node) + "："
 prepareLoop:
@@ -652,7 +663,7 @@ prepareLoop:
 		if beforeAttempt != nil {
 			beforeAttempt()
 		}
-		client := m.ticketClient(proxyRuntime)
+		client := m.orderTicketClient(proxyRuntime, superRuntime)
 		prepared, err := client.PrepareOrder(ctx, latestTask, cookie)
 		if err != nil {
 			if !m.retryConcurrentRunError(ctx, formatRetryMessage(prefix+"订单准备失败："+err.Error()), checkedAt, interval, terminalReached, setWorkerRuntime) {
@@ -683,6 +694,12 @@ prepareLoop:
 					m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
 					continue prepareLoop
 				}
+				if switched, reason, from, to := switchSuperModeRuntime(superRuntime, result, createErr); switched {
+					if !setWorkerRuntime(prefix+superModeSwitchMessage(reason, from, to), "warn", checkedAt) {
+						return
+					}
+					continue prepareLoop
+				}
 				createFailedMessage = prefix + "创建订单失败：" + createErr.Error()
 				continue
 			}
@@ -706,7 +723,7 @@ prepareLoop:
 			continue
 		}
 
-		payParam, ok := m.waitForConcurrentPayParam(ctx, result.OrderID, cookie, interval, deadlineExceeded, deadlineStatus, payParamDeadlineMessage, deadlineLevel, proxyRuntime, prefix, terminalReached, setWorkerRuntime, finishTerminal)
+		payParam, ok := m.waitForConcurrentPayParam(ctx, result.OrderID, cookie, interval, deadlineExceeded, deadlineStatus, payParamDeadlineMessage, deadlineLevel, proxyRuntime, superRuntime, prefix, terminalReached, setWorkerRuntime, finishTerminal)
 		if !ok {
 			return
 		}
@@ -725,7 +742,7 @@ func (m *Manager) retryConcurrentRunError(ctx context.Context, message string, c
 	return m.wait(ctx, interval)
 }
 
-func (m *Manager) waitForConcurrentPayParam(ctx context.Context, orderID string, cookie string, interval time.Duration, deadlineExceeded func() bool, deadlineStatus string, deadlineMessage string, deadlineLevel string, proxyRuntime *taskProxyRuntime, prefix string, terminalReached func() bool, setWorkerRuntime func(string, string, string) bool, finishTerminal func(string, string, string)) (biliticket.PayParamResult, bool) {
+func (m *Manager) waitForConcurrentPayParam(ctx context.Context, orderID string, cookie string, interval time.Duration, deadlineExceeded func() bool, deadlineStatus string, deadlineMessage string, deadlineLevel string, proxyRuntime *taskProxyRuntime, superRuntime *superModeRuntime, prefix string, terminalReached func() bool, setWorkerRuntime func(string, string, string) bool, finishTerminal func(string, string, string)) (biliticket.PayParamResult, bool) {
 	for {
 		if ctx.Err() != nil || terminalReached() {
 			return biliticket.PayParamResult{}, false
@@ -734,7 +751,7 @@ func (m *Manager) waitForConcurrentPayParam(ctx context.Context, orderID string,
 			finishTerminal(deadlineStatus, deadlineMessage, deadlineLevel)
 			return biliticket.PayParamResult{}, false
 		}
-		payParam, err := m.ticketClient(proxyRuntime).GetPayParam(ctx, orderID, cookie)
+		payParam, err := m.orderTicketClient(proxyRuntime, superRuntime).GetPayParam(ctx, orderID, cookie)
 		if err == nil {
 			return payParam, true
 		}
@@ -798,7 +815,7 @@ prepareLoop:
 					m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
 					continue prepareLoop
 				}
-				if shouldWaitForNoProxyCreate412(result, proxyRuntime) {
+				if shouldWaitForNoProxyCreate412(result, createErr, proxyRuntime) {
 					m.setRuntimeWithCheckedAt(taskID, "running", formatRetryMessage("创建订单失败："+createErr.Error()), "warn", checkedAt)
 					if !m.wait(ctx, noProxyCreate412RetryWait) {
 						return orderAttemptStopped
@@ -818,7 +835,7 @@ prepareLoop:
 			}
 
 			interval := restockPollInterval(latestTask)
-			payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, "failed", "已超过任务结束时间，停止获取支付参数。", "warn", proxyRuntime)
+			payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, "failed", "已超过任务结束时间，停止获取支付参数。", "warn", proxyRuntime, nil)
 			if !ok {
 				return orderAttemptStopped
 			}
@@ -869,11 +886,67 @@ type taskProxyRuntime struct {
 	fixed   bool
 }
 
+type superModeRuntime struct {
+	baseURLs []string
+	index    int
+}
+
 func isConcurrentProxyTask(task model.Task) bool {
 	taskMode := model.NormalizeTaskMode(task.TaskMode)
 	return task.ProxyGroupID > 0 &&
 		model.NormalizeProxyMode(task.ProxyMode) == model.ProxyModeConcurrent &&
 		(taskMode == model.TaskModeRush || taskMode == model.TaskModeHybrid)
+}
+
+func newSuperModeRuntime(task model.Task) *superModeRuntime {
+	if !task.SuperMode {
+		return nil
+	}
+	taskMode := model.NormalizeTaskMode(task.TaskMode)
+	if taskMode != model.TaskModeRush && taskMode != model.TaskModeHybrid {
+		return nil
+	}
+	baseURLs := make([]string, 0, len(superModeBaseURLs))
+	for _, baseURL := range superModeBaseURLs {
+		baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+		if baseURL != "" {
+			baseURLs = append(baseURLs, baseURL)
+		}
+	}
+	if len(baseURLs) < 2 {
+		return nil
+	}
+	return &superModeRuntime{baseURLs: baseURLs}
+}
+
+func (r *superModeRuntime) clone() *superModeRuntime {
+	if r == nil {
+		return nil
+	}
+	baseURLs := append([]string(nil), r.baseURLs...)
+	return &superModeRuntime{baseURLs: baseURLs, index: r.index}
+}
+
+func (r *superModeRuntime) currentBaseURL() string {
+	if r == nil || len(r.baseURLs) == 0 {
+		return ""
+	}
+	if r.index < 0 || r.index >= len(r.baseURLs) {
+		r.index = 0
+	}
+	return r.baseURLs[r.index]
+}
+
+func (r *superModeRuntime) currentLabel() string {
+	return superModeBaseLabel(r.currentBaseURL())
+}
+
+func (r *superModeRuntime) switchNext() bool {
+	if r == nil || len(r.baseURLs) < 2 {
+		return false
+	}
+	r.index = (r.index + 1) % len(r.baseURLs)
+	return true
 }
 
 func (m *Manager) newTaskProxyRuntime(ctx context.Context, taskID int64, task model.Task) (*taskProxyRuntime, error) {
@@ -1060,22 +1133,81 @@ func (m *Manager) ticketClient(proxyRuntime *taskProxyRuntime) *biliticket.Clien
 	return m.ticket
 }
 
+func (m *Manager) orderTicketClient(proxyRuntime *taskProxyRuntime, superRuntime *superModeRuntime) *biliticket.Client {
+	client := m.ticketClient(proxyRuntime)
+	if superRuntime == nil {
+		return client
+	}
+	return client.WithShowBaseURL(superRuntime.currentBaseURL())
+}
+
+func switchSuperModeRuntime(superRuntime *superModeRuntime, result biliticket.OrderCreateResult, err error) (bool, string, string, string) {
+	if superRuntime == nil {
+		return false, "", "", ""
+	}
+	reason := createRiskReason(result, err)
+	if reason == "" {
+		return false, "", "", ""
+	}
+	from := superRuntime.currentLabel()
+	if !superRuntime.switchNext() {
+		return false, "", "", ""
+	}
+	return true, reason, from, superRuntime.currentLabel()
+}
+
+func superModeSwitchMessage(reason string, from string, to string) string {
+	if strings.TrimSpace(from) == "" {
+		from = "当前域名"
+	}
+	if strings.TrimSpace(to) == "" {
+		to = "下一个域名"
+	}
+	return fmt.Sprintf("SuperMode 检测到 createV2 返回 %s，已将订单域名从 %s 切换到 %s，重新准备订单。", reason, from, to)
+}
+
+func superModeBaseLabel(baseURL string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Host == "" {
+		return strings.TrimPrefix(strings.TrimPrefix(baseURL, "https://"), "http://")
+	}
+	return parsed.Host
+}
+
 func shouldSwitchProxyForCreateError(result biliticket.OrderCreateResult, err error) bool {
-	if result.Code == 412 || result.Code == 3 {
+	if isCreateRisk(result, err) {
 		return true
 	}
 	return proxynet.IsRequestError(err)
 }
 
-func shouldWaitForNoProxyCreate412(result biliticket.OrderCreateResult, proxyRuntime *taskProxyRuntime) bool {
-	return proxyRuntime == nil && result.Code == 412
+func shouldWaitForNoProxyCreate412(result biliticket.OrderCreateResult, err error, proxyRuntime *taskProxyRuntime) bool {
+	return proxyRuntime == nil && (result.Code == 412 || biliticket.HTTPStatusCode(err) == 412)
 }
 
-func createErrorRetryInterval(result biliticket.OrderCreateResult, proxyRuntime *taskProxyRuntime, fallback time.Duration) time.Duration {
-	if shouldWaitForNoProxyCreate412(result, proxyRuntime) {
+func createErrorRetryInterval(result biliticket.OrderCreateResult, err error, proxyRuntime *taskProxyRuntime, fallback time.Duration) time.Duration {
+	if shouldWaitForNoProxyCreate412(result, err, proxyRuntime) {
 		return noProxyCreate412RetryWait
 	}
 	return fallback
+}
+
+func isCreateRisk(result biliticket.OrderCreateResult, err error) bool {
+	return createRiskReason(result, err) != ""
+}
+
+func createRiskReason(result biliticket.OrderCreateResult, err error) string {
+	if result.Code == 412 || result.Code == 3 {
+		return strconv.FormatInt(result.Code, 10)
+	}
+	if biliticket.HTTPStatusCode(err) == 412 {
+		return "HTTP 412"
+	}
+	return ""
 }
 
 func taskPollInterval(milliseconds int) time.Duration {
@@ -1149,7 +1281,7 @@ func (m *Manager) retryRunError(ctx context.Context, taskID int64, message strin
 	return m.wait(ctx, interval)
 }
 
-func (m *Manager) waitForPayParam(ctx context.Context, taskID int64, orderID string, cookie string, interval time.Duration, deadlineExceeded func() bool, deadlineStatus string, deadlineMessage string, deadlineLevel string, proxyRuntime *taskProxyRuntime) (biliticket.PayParamResult, bool) {
+func (m *Manager) waitForPayParam(ctx context.Context, taskID int64, orderID string, cookie string, interval time.Duration, deadlineExceeded func() bool, deadlineStatus string, deadlineMessage string, deadlineLevel string, proxyRuntime *taskProxyRuntime, superRuntime *superModeRuntime) (biliticket.PayParamResult, bool) {
 	for {
 		if ctx.Err() != nil {
 			return biliticket.PayParamResult{}, false
@@ -1158,7 +1290,7 @@ func (m *Manager) waitForPayParam(ctx context.Context, taskID int64, orderID str
 			m.setRuntime(taskID, deadlineStatus, deadlineMessage, deadlineLevel)
 			return biliticket.PayParamResult{}, false
 		}
-		payParam, err := m.ticketClient(proxyRuntime).GetPayParam(ctx, orderID, cookie)
+		payParam, err := m.orderTicketClient(proxyRuntime, superRuntime).GetPayParam(ctx, orderID, cookie)
 		if err == nil {
 			return payParam, true
 		}
