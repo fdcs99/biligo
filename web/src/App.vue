@@ -972,7 +972,7 @@ async function saveProxyNode() {
       throw new Error('请先选择代理组')
     }
     if (proxyNodeFormLocked.value) {
-      throw new Error('API 代理组不支持手动添加代理节点，请使用拉取检测')
+      throw new Error('API 代理组不支持手动添加代理节点，请使用拉取')
     }
     if (editingProxyNodeId.value) {
       await api.updateProxyNode(editingProxyNodeId.value, proxyNodeForm)
@@ -1008,16 +1008,13 @@ async function testProxyGroup(group: ProxyGroup) {
   }, '代理检测完成')
 }
 
-async function pullAndTestProxyGroup(group: ProxyGroup) {
+async function pullProxyGroup(group: ProxyGroup) {
   await run(async () => {
-    const tested = await api.pullAndTestProxyGroup(group.id)
+    await api.pullProxyGroup(group.id)
     await refreshProxyGroups()
     selectedProxyGroupId.value = group.id
     proxyNodes.value = await api.listProxyNodes(group.id)
-    if (tested.lastTestStatus === 'error') {
-      throw new Error(tested.lastTestMessage || '代理检测失败')
-    }
-  }, '代理已拉取并检测')
+  }, '代理已拉取')
 }
 
 function cleanConfig(config: Record<string, string>) {
@@ -2538,7 +2535,7 @@ onUnmounted(() => {
                 show-icon
                 :closable="false"
                 class="form-tip-alert"
-                title="提取次数只影响任务执行时的代理准备；拉取检测仍只提取 1 次。"
+                title="提取次数只影响任务执行时的代理准备；手动拉取仍只提取 1 次。"
               />
               <el-row :gutter="12">
                 <el-col :xs="24" :sm="12">
@@ -2572,7 +2569,7 @@ onUnmounted(() => {
                 <el-option v-for="group in proxyGroups" :key="group.id" :value="group.id" :label="group.name" />
               </el-select>
             </el-form-item>
-            <el-alert v-if="proxyNodeFormLocked" type="info" :closable="false" title="API 代理组请使用拉取检测生成节点。" class="form-tip-alert" />
+            <el-alert v-if="proxyNodeFormLocked" type="info" :closable="false" title="API 代理组请使用拉取生成节点。" class="form-tip-alert" />
             <template v-else>
               <el-form-item label="节点名称">
                 <el-input v-model="proxyNodeForm.name" placeholder="默认使用 host:port" clearable />
@@ -2634,7 +2631,7 @@ onUnmounted(() => {
               <el-tag :type="proxyTestTagType(group.lastTestStatus)">{{ group.lastTestStatus || '未检测' }}</el-tag>
               <el-button :icon="View" @click="selectProxyGroup(group)">节点</el-button>
               <el-button :icon="Check" :disabled="group.inUse || group.nodeCount === 0" @click="testProxyGroup(group)">检测</el-button>
-              <el-button v-if="group.type === 'api'" :icon="Refresh" :disabled="group.inUse" @click="pullAndTestProxyGroup(group)">拉取检测</el-button>
+              <el-button v-if="group.type === 'api'" :icon="Refresh" :disabled="group.inUse" @click="pullProxyGroup(group)">拉取</el-button>
               <el-button :icon="Edit" :disabled="group.inUse" @click="editProxyGroup(group)">编辑</el-button>
               <el-button type="danger" plain :icon="Delete" :disabled="group.inUse" @click="confirmDeleteProxyGroup(group)">删除</el-button>
             </div>

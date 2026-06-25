@@ -393,10 +393,14 @@ func TestProxyAPIsAndBusyGuard(t *testing.T) {
 	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "提取次数") {
 		t.Fatalf("create invalid api proxy group status = %d, body = %s", resp.Code, resp.Body.String())
 	}
+	if _, err := taskStore.SetProxyGroupTestResult(context.Background(), apiGroup.ID, "success", "旧检测结果"); err != nil {
+		t.Fatalf("SetProxyGroupTestResult: %v", err)
+	}
 
 	originalPull := pullKuaidailiDPS
 	originalTest := testProxyNode
 	pullCalls := 0
+	testCalls := 0
 	pullKuaidailiDPS = func(context.Context, model.ProxyGroup) ([]model.ProxyNodeInput, error) {
 		pullCalls++
 		return []model.ProxyNodeInput{{
@@ -407,21 +411,46 @@ func TestProxyAPIsAndBusyGuard(t *testing.T) {
 		}}, nil
 	}
 	testProxyNode = func(context.Context, model.ProxyNode) (proxynet.TestResult, error) {
-		return proxynet.TestResult{LatencyMillis: 5, IPLocation: "当前 IP：127.0.0.1 来自于：本地"}, nil
+		testCalls++
+		return proxynet.TestResult{}, errors.New("pull should not test proxy nodes")
 	}
 	t.Cleanup(func() {
 		pullKuaidailiDPS = originalPull
 		testProxyNode = originalTest
 	})
-	req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/proxy-groups/%d/pull-test", apiGroup.ID), nil)
+	req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/proxy-groups/%d/pull", apiGroup.ID), nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp = httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 	if resp.Code != http.StatusOK {
-		t.Fatalf("pull-test api proxy group status = %d, body = %s", resp.Code, resp.Body.String())
+		t.Fatalf("pull api proxy group status = %d, body = %s", resp.Code, resp.Body.String())
 	}
 	if pullCalls != 1 {
-		t.Fatalf("pull-test calls = %d, want 1", pullCalls)
+		t.Fatalf("pull calls = %d, want 1", pullCalls)
+	}
+	if testCalls != 0 {
+		t.Fatalf("test calls = %d, want 0", testCalls)
+	}
+	var pulledGroup model.ProxyGroup
+	if err := json.Unmarshal(resp.Body.Bytes(), &pulledGroup); err != nil {
+		t.Fatalf("decode pulled proxy group: %v", err)
+	}
+	if pulledGroup.LastPullStatus != "success" || pulledGroup.LastTestStatus != "" || pulledGroup.LastTestMessage != "" || pulledGroup.LastTestedAt != "" {
+		t.Fatalf("unexpected pulled group status: %#v", pulledGroup)
+	}
+	pulledNodes, err := taskStore.ListProxyNodes(context.Background(), apiGroup.ID)
+	if err != nil {
+		t.Fatalf("ListProxyNodes: %v", err)
+	}
+	if len(pulledNodes) != 1 || pulledNodes[0].LastTestStatus != "" {
+		t.Fatalf("unexpected pulled nodes: %#v", pulledNodes)
+	}
+	req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/proxy-groups/%d/pull-test", apiGroup.ID), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("old pull-test status = %d, body = %s", resp.Code, resp.Body.String())
 	}
 
 	body = bytes.NewBufferString(`{"name":"节点2","protocol":"http","host":"127.0.0.1","port":8081}`)

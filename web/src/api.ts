@@ -522,8 +522,8 @@ export const api = {
     request<ProxyNode>(`/api/proxy-nodes/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
   deleteProxyNode: (id: number) => request<void>(`/api/proxy-nodes/${id}`, { method: 'DELETE' }),
   testProxyGroup: (groupId: number) => request<ProxyGroup>(`/api/proxy-groups/${groupId}/test`, { method: 'POST' }),
-  pullAndTestProxyGroup: (groupId: number) =>
-    request<ProxyGroup>(`/api/proxy-groups/${groupId}/pull-test`, { method: 'POST' }),
+  pullProxyGroup: (groupId: number) =>
+    request<ProxyGroup>(`/api/proxy-groups/${groupId}/pull`, { method: 'POST' }),
   listLogs: (taskId?: number) =>
     request<TaskLog[]>(taskId ? `/api/logs?task_id=${taskId}` : '/api/logs'),
 }

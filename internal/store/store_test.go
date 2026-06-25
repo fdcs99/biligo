@@ -392,6 +392,17 @@ func TestProxyStoreCRUDAndTaskReference(t *testing.T) {
 	if group.LastPullStatus != "success" || group.NodeCount != 1 || group.AvailableNodeCount != 1 {
 		t.Fatalf("unexpected group after pull result: %#v", group)
 	}
+	group, err = store.SetProxyGroupTestResult(context.Background(), group.ID, "success", "old test")
+	if err != nil {
+		t.Fatalf("SetProxyGroupTestResult: %v", err)
+	}
+	group, err = store.ClearProxyGroupTestResult(context.Background(), group.ID)
+	if err != nil {
+		t.Fatalf("ClearProxyGroupTestResult: %v", err)
+	}
+	if group.LastTestStatus != "" || group.LastTestMessage != "" || group.LastTestedAt != "" {
+		t.Fatalf("unexpected group after clearing test result: %#v", group)
+	}
 
 	task := createTestTask(t, store, "代理任务")
 	task, err = store.UpdateTask(context.Background(), task.ID, model.TaskInput{

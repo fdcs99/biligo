@@ -842,6 +842,19 @@ func (s *Store) SetProxyGroupTestResult(ctx context.Context, id int64, status st
 	return s.GetProxyGroup(ctx, id)
 }
 
+func (s *Store) ClearProxyGroupTestResult(ctx context.Context, id int64) (model.ProxyGroup, error) {
+	now := nowText()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE proxy_groups
+		SET last_test_status = '', last_test_message = '', last_tested_at = '', updated_at = ?
+		WHERE id = ?
+	`, now, id)
+	if err != nil {
+		return model.ProxyGroup{}, err
+	}
+	return s.GetProxyGroup(ctx, id)
+}
+
 func (s *Store) ListTasks(ctx context.Context) ([]model.Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT

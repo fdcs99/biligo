@@ -947,7 +947,7 @@
 
 `protocol` 可选 `http`、`https`、`socks5`。账号密码可为空。
 
-仅普通代理组支持手动新增节点；API 代理组需要通过“拉取检测”生成节点。
+仅普通代理组支持手动新增节点；API 代理组需要通过“拉取”生成节点。
 
 ### PUT `/api/proxy-nodes/{id}`
 
@@ -961,9 +961,9 @@
 
 检测组内节点可用性，并写入节点与代理组的最近检测结果。节点延时来自通过代理向 `show.bilibili.com` 发起的 `HEAD` 请求，IP 归属地来自通过同一代理请求 `myip.ipip.net`。
 
-### POST `/api/proxy-groups/{id}/pull-test`
+### POST `/api/proxy-groups/{id}/pull`
 
-仅 API 代理组可用。后端会从快代理私密代理接口拉取节点、落库为 `source=api`，随后检测节点可用性并返回更新后的代理组。该接口仅拉取 1 次，不受 `apiConfig.pullTimes` 影响。
+仅 API 代理组可用。后端会从快代理私密代理接口拉取节点并落库为 `source=api`，不会自动检测节点可用性；需要检测时请单独调用 `POST /api/proxy-groups/{id}/test`。该接口仅拉取 1 次，不受 `apiConfig.pullTimes` 影响；拉取成功会清空代理组最近检测状态，避免旧检测结果误导。
 
 ## 通知管理
 

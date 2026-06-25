@@ -159,7 +159,7 @@ func NewRuntime(store *store.Store, panel *panelauth.Manager, logger *applog.Log
 			protected.PUT("/proxy-nodes/:id", handler.updateProxyNode)
 			protected.DELETE("/proxy-nodes/:id", handler.deleteProxyNode)
 			protected.POST("/proxy-groups/:id/test", handler.testProxyGroup)
-			protected.POST("/proxy-groups/:id/pull-test", handler.pullAndTestProxyGroup)
+			protected.POST("/proxy-groups/:id/pull", handler.pullProxyGroup)
 
 			protected.GET("/logs", handler.listLogs)
 		}
@@ -894,7 +894,7 @@ func (h *Handler) createProxyNode(c *gin.Context) {
 		return
 	}
 	if group.Type == model.ProxyGroupTypeAPI {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "API 代理组不支持手动添加代理节点，请使用拉取检测"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "API 代理组不支持手动添加代理节点，请使用拉取"})
 		return
 	}
 	var input model.ProxyNodeInput
@@ -970,7 +970,7 @@ func (h *Handler) testProxyGroup(c *gin.Context) {
 	c.JSON(http.StatusOK, group)
 }
 
-func (h *Handler) pullAndTestProxyGroup(c *gin.Context) {
+func (h *Handler) pullProxyGroup(c *gin.Context) {
 	id, ok := parseID(c)
 	if !ok {
 		return
@@ -984,7 +984,7 @@ func (h *Handler) pullAndTestProxyGroup(c *gin.Context) {
 		return
 	}
 	if group.Type != model.ProxyGroupTypeAPI || group.APIProvider != model.ProxyProviderKuaidailiDPS {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "仅快代理 API 代理组支持拉取检测"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "仅快代理 API 代理组支持拉取"})
 		return
 	}
 	pullCtx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
@@ -1003,12 +1003,12 @@ func (h *Handler) pullAndTestProxyGroup(c *gin.Context) {
 		respondError(c, err)
 		return
 	}
-	tested, err := h.testProxyGroupNodes(c.Request.Context(), id)
+	group, err = h.store.ClearProxyGroupTestResult(c.Request.Context(), id)
 	if err != nil {
 		respondError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, tested)
+	c.JSON(http.StatusOK, group)
 }
 
 func (h *Handler) testProxyGroupNodes(ctx context.Context, groupID int64) (model.ProxyGroup, error) {
