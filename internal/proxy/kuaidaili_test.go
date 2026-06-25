@@ -39,3 +39,11 @@ func TestParseKuaidailiProxyItems(t *testing.T) {
 		t.Fatalf("unexpected second proxy: %#v", second)
 	}
 }
+
+func TestKuaidailiReservedConfigKeysIncludeRuntimeOptions(t *testing.T) {
+	for _, key := range []string{"num", "pullTimes", "pullBeforeMinutes", "proxyProtocol"} {
+		if !isReservedKuaidailiConfigKey(key) {
+			t.Fatalf("%s should not be passed through to Kuaidaili query params", key)
+		}
+	}
+}

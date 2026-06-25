@@ -51,6 +51,9 @@ type Runtime struct {
 
 const maxAccountImportJSONBytes = 2 * 1024 * 1024
 
+var pullKuaidailiDPS = proxynet.PullKuaidailiDPS
+var testProxyNode = proxynet.TestNode
+
 type RouterOption func(*RouterOptions)
 
 func WithWebFS(webFS fs.FS) RouterOption {
@@ -985,7 +988,7 @@ func (h *Handler) pullAndTestProxyGroup(c *gin.Context) {
 		return
 	}
 	pullCtx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
-	nodes, err := proxynet.PullKuaidailiDPS(pullCtx, group)
+	nodes, err := pullKuaidailiDPS(pullCtx, group)
 	cancel()
 	if err != nil {
 		_, _ = h.store.SetProxyGroupPullResult(c.Request.Context(), id, "error", err.Error())
@@ -1017,7 +1020,7 @@ func (h *Handler) testProxyGroupNodes(ctx context.Context, groupID int64) (model
 	totalLatencyMillis := int64(0)
 	for _, node := range nodes {
 		testCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		result, err := proxynet.TestNode(testCtx, node)
+		result, err := testProxyNode(testCtx, node)
 		cancel()
 		status := "success"
 		message := "代理检测通过。"
@@ -1303,6 +1306,10 @@ func validateProxyGroupInput(c *gin.Context, input model.ProxyGroupInput) bool {
 		}
 		if strings.TrimSpace(input.APIConfig["secretId"]) == "" || strings.TrimSpace(input.APIConfig["secretKey"]) == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "快代理 SecretId 和 SecretKey 不能为空"})
+			return false
+		}
+		if _, ok := model.ParseProxyAPIPullTimes(input.APIConfig["pullTimes"]); !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("提取次数必须是 %d-%d 的整数", model.DefaultProxyAPIPullTimes, model.MaxProxyAPIPullTimes)})
 			return false
 		}
 	}

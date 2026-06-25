@@ -1583,6 +1583,9 @@ func normalizeProxyGroupInput(input model.ProxyGroupInput) model.ProxyGroupInput
 		}
 		normalizedConfig[key] = strings.TrimSpace(value)
 	}
+	if input.Type == model.ProxyGroupTypeAPI {
+		normalizedConfig["pullTimes"] = fmt.Sprint(model.NormalizeProxyAPIPullTimes(normalizedConfig["pullTimes"]))
+	}
 	input.APIConfig = normalizedConfig
 	return input
 }

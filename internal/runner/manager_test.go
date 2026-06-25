@@ -266,6 +266,13 @@ func TestProxyRuntimePullBeforeUsesAPIConfig(t *testing.T) {
 	if runtime.pullBefore() != defaultProxyAPIPullBefore {
 		t.Fatalf("pullBefore = %v, want default %v", runtime.pullBefore(), defaultProxyAPIPullBefore)
 	}
+	if runtime.pullTimes() != model.DefaultProxyAPIPullTimes {
+		t.Fatalf("pullTimes = %d, want default %d", runtime.pullTimes(), model.DefaultProxyAPIPullTimes)
+	}
+	runtime.group.APIConfig["pullTimes"] = "3"
+	if runtime.pullTimes() != 3 {
+		t.Fatalf("pullTimes = %d, want 3", runtime.pullTimes())
+	}
 }
 
 func TestRunnerStartsOrderFlowWithoutTicketStatusCheck(t *testing.T) {
@@ -705,6 +712,199 @@ func TestRunnerPullsAPIProxyBeforeOrderWhenSaleAlreadyStarted(t *testing.T) {
 	}
 	if !foundPullLog {
 		t.Fatalf("api pull success log missing: %#v", logs)
+	}
+}
+
+func TestRunnerPullsAPIProxyMultipleTimesBeforeOrder(t *testing.T) {
+	var pullCalls atomic.Int32
+	var prepareCalls atomic.Int32
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if pullCalls.Load() < 3 {
+			t.Fatalf("order request %s arrived before configured API proxy pulls", r.URL.Path)
+		}
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			prepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+		case "/api/ticket/order/createV2":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-API-PROXY-MULTI", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-API-PROXY-MULTI"}})
+		default:
+			t.Fatalf("unexpected proxy path: %s", r.URL.Path)
+		}
+	}))
+	defer proxyServer.Close()
+
+	parsedProxyURL, err := url.Parse(proxyServer.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	proxyPort, err := strconv.Atoi(parsedProxyURL.Port())
+	if err != nil {
+		t.Fatalf("parse proxy port: %v", err)
+	}
+	originalPull := pullKuaidailiDPS
+	pullKuaidailiDPS = func(context.Context, model.ProxyGroup) ([]model.ProxyNodeInput, error) {
+		call := pullCalls.Add(1)
+		if call == 3 {
+			return []model.ProxyNodeInput{{
+				Name:     "API 备用节点",
+				Protocol: model.ProxyProtocolHTTP,
+				Host:     "198.51.100.9",
+				Port:     18888,
+			}}, nil
+		}
+		return []model.ProxyNodeInput{{
+			Name:     "API 拉取节点",
+			Protocol: model.ProxyProtocolHTTP,
+			Host:     parsedProxyURL.Hostname(),
+			Port:     proxyPort,
+		}}, nil
+	}
+	t.Cleanup(func() {
+		pullKuaidailiDPS = originalPull
+	})
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+	group, err := taskStore.CreateProxyGroup(context.Background(), model.ProxyGroupInput{
+		Name:        "API 代理组",
+		Type:        model.ProxyGroupTypeAPI,
+		APIProvider: model.ProxyProviderKuaidailiDPS,
+		APIConfig: map[string]string{
+			"secretId":          "sid",
+			"secretKey":         "skey",
+			"pullTimes":         "3",
+			"pullBeforeMinutes": "5",
+			"proxyProtocol":     "http",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateProxyGroup: %v", err)
+	}
+	task = updateTaskProxyGroup(t, taskStore, task, group.ID)
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(nil, "http://show.bilibili.test"), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-API-PROXY-MULTI" {
+		t.Fatalf("OrderID = %q, want ORDER-API-PROXY-MULTI", updated.OrderID)
+	}
+	if pullCalls.Load() != 3 {
+		t.Fatalf("pull calls = %d, want 3", pullCalls.Load())
+	}
+	if prepareCalls.Load() == 0 {
+		t.Fatal("order flow did not use pulled proxy node")
+	}
+	nodes, err := taskStore.ListProxyNodes(context.Background(), group.ID)
+	if err != nil {
+		t.Fatalf("ListProxyNodes: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("proxy nodes = %#v, want 2 deduplicated nodes", nodes)
+	}
+}
+
+func TestProxyRuntimePullTimesRetriesFailures(t *testing.T) {
+	var pullCalls atomic.Int32
+	originalPull := pullKuaidailiDPS
+	pullKuaidailiDPS = func(context.Context, model.ProxyGroup) ([]model.ProxyNodeInput, error) {
+		call := pullCalls.Add(1)
+		if call <= 2 {
+			return nil, errors.New("temporary proxy api failure")
+		}
+		return []model.ProxyNodeInput{{
+			Name:     fmt.Sprintf("API 节点 %d", call),
+			Protocol: model.ProxyProtocolHTTP,
+			Host:     fmt.Sprintf("127.0.0.%d", call),
+			Port:     18080 + int(call),
+		}}, nil
+	}
+	t.Cleanup(func() {
+		pullKuaidailiDPS = originalPull
+	})
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+	group, err := taskStore.CreateProxyGroup(context.Background(), model.ProxyGroupInput{
+		Name:        "API 代理组",
+		Type:        model.ProxyGroupTypeAPI,
+		APIProvider: model.ProxyProviderKuaidailiDPS,
+		APIConfig: map[string]string{
+			"secretId":  "sid",
+			"secretKey": "skey",
+			"pullTimes": "2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateProxyGroup: %v", err)
+	}
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(nil, "http://show.bilibili.test"), events.NewHub(), fakeTimeSync{})
+	runtime := &taskProxyRuntime{manager: manager, taskID: task.ID, group: group, index: -1}
+	if err := runtime.pullAndActivate(context.Background()); err != nil {
+		t.Fatalf("pullAndActivate: %v", err)
+	}
+	if pullCalls.Load() != 4 {
+		t.Fatalf("pull calls = %d, want 4", pullCalls.Load())
+	}
+	if len(runtime.nodes) != 2 {
+		t.Fatalf("runtime nodes = %#v, want 2", runtime.nodes)
+	}
+	logs, err := taskStore.ListTaskLogs(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("ListTaskLogs: %v", err)
+	}
+	foundFailureLog := false
+	for _, log := range logs {
+		if strings.Contains(log.Message, "第 1/2 次提取失败") {
+			foundFailureLog = true
+			break
+		}
+	}
+	if !foundFailureLog {
+		t.Fatalf("pull failure log missing: %#v", logs)
+	}
+}
+
+func TestProxyRuntimePullTimesFailsAfterThreeAttemptsPerTarget(t *testing.T) {
+	var pullCalls atomic.Int32
+	originalPull := pullKuaidailiDPS
+	pullKuaidailiDPS = func(context.Context, model.ProxyGroup) ([]model.ProxyNodeInput, error) {
+		pullCalls.Add(1)
+		return nil, errors.New("proxy api unavailable")
+	}
+	t.Cleanup(func() {
+		pullKuaidailiDPS = originalPull
+	})
+
+	taskStore, task := createRunnableTask(t)
+	defer taskStore.Close()
+	group, err := taskStore.CreateProxyGroup(context.Background(), model.ProxyGroupInput{
+		Name:        "API 代理组",
+		Type:        model.ProxyGroupTypeAPI,
+		APIProvider: model.ProxyProviderKuaidailiDPS,
+		APIConfig: map[string]string{
+			"secretId":  "sid",
+			"secretKey": "skey",
+			"pullTimes": "2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateProxyGroup: %v", err)
+	}
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(nil, "http://show.bilibili.test"), events.NewHub(), fakeTimeSync{})
+	runtime := &taskProxyRuntime{manager: manager, taskID: task.ID, group: group, index: -1}
+	err = runtime.pullAndActivate(context.Background())
+	if err == nil {
+		t.Fatal("pullAndActivate returned nil, want error")
+	}
+	if pullCalls.Load() != proxyAPIPullMaxAttempts {
+		t.Fatalf("pull calls = %d, want %d", pullCalls.Load(), proxyAPIPullMaxAttempts)
 	}
 }
 

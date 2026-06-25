@@ -799,7 +799,7 @@
 - 抢票模式和抢票+回流模式的抢票阶段会按 `proxyMode` 使用代理组；回流模式和抢票+回流模式的回流阶段不使用代理组。
 - `proxyMode=round_robin` 为循环代理：任务使用代理组当前节点，预热连接也会走同一个代理节点；`createV2` 返回 `412` 或 `3` 时立即切换到下一个代理节点重试，其他业务错误继续使用当前节点重试；代理网络请求失败时会标记当前节点检测失败，并切换到下一个代理节点重试。
 - `proxyMode=concurrent` 为并发代理：起售前不执行连接预热；每个可用代理节点启动一个抢票 worker，worker 固定使用自己的代理节点，不在线程内切换代理；任一 worker 成功进入 `waiting_payment` 或检测到重复订单后，会停止其他 worker。
-- API 代理组会按 `apiConfig.pullBeforeMinutes` 在抢票前指定分钟数拉取快代理私密代理；未配置时默认 5 分钟，若任务下发时已不足该时间、已到起售时间或已过起售时间，则先立即拉取代理节点再抢票；拉取完成日志会输出本次准备好的全部代理节点。
+- API 代理组会按 `apiConfig.pullBeforeMinutes` 在抢票前指定分钟数拉取快代理私密代理；未配置时默认 5 分钟，若任务下发时已不足该时间、已到起售时间或已过起售时间，则先立即拉取代理节点再抢票；任务执行时 `apiConfig.pullTimes` 控制需要成功提取几次代理，默认 1，每次最多补重试 3 次；多次提取结果会合并去重，拉取完成日志会输出本次准备好的全部代理节点。
 
 响应：
 
@@ -846,6 +846,7 @@
     "secretKey": "secret-key",
     "signType": "hmacsha1",
     "num": "5",
+    "pullTimes": "1",
     "pullBeforeMinutes": "5",
     "proxyProtocol": "http"
   },
@@ -906,13 +907,14 @@
     "secretKey": "secret-key",
     "signType": "hmacsha1",
     "num": "5",
+    "pullTimes": "1",
     "pullBeforeMinutes": "5",
     "proxyProtocol": "http"
   }
 }
 ```
 
-`type=static` 时 `apiProvider` 与 `apiConfig` 可为空；`type=api` 目前仅支持 `apiProvider=kuaidaili_dps`。`pullBeforeMinutes` 表示任务起售前多少分钟自动提取代理，缺省为 `5`。
+`type=static` 时 `apiProvider` 与 `apiConfig` 可为空；`type=api` 目前仅支持 `apiProvider=kuaidaili_dps`。`num` 表示单次提取数量；`pullTimes` 表示任务执行时需要成功提取几次，缺省为 `1`，有效范围 `1-20`；`pullBeforeMinutes` 表示任务起售前多少分钟自动提取代理，缺省为 `5`。
 
 ### PUT `/api/proxy-groups/{id}`
 
@@ -961,7 +963,7 @@
 
 ### POST `/api/proxy-groups/{id}/pull-test`
 
-仅 API 代理组可用。后端会从快代理私密代理接口拉取节点、落库为 `source=api`，随后检测节点可用性并返回更新后的代理组。
+仅 API 代理组可用。后端会从快代理私密代理接口拉取节点、落库为 `source=api`，随后检测节点可用性并返回更新后的代理组。该接口仅拉取 1 次，不受 `apiConfig.pullTimes` 影响。
 
 ## 通知管理
 

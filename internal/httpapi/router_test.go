@@ -17,6 +17,7 @@ import (
 	"github.com/fdcs99/biligo/internal/applog"
 	"github.com/fdcs99/biligo/internal/model"
 	"github.com/fdcs99/biligo/internal/panelauth"
+	proxynet "github.com/fdcs99/biligo/internal/proxy"
 	"github.com/fdcs99/biligo/internal/store"
 	"github.com/gin-gonic/gin"
 )
@@ -366,7 +367,7 @@ func TestProxyAPIsAndBusyGuard(t *testing.T) {
 		t.Fatalf("unexpected proxy node: %#v", node)
 	}
 
-	body = bytes.NewBufferString(`{"name":"API代理组","type":"api","apiProvider":"kuaidaili_dps","apiConfig":{"secretId":"sid","secretKey":"skey"}}`)
+	body = bytes.NewBufferString(`{"name":"API代理组","type":"api","apiProvider":"kuaidaili_dps","apiConfig":{"secretId":"sid","secretKey":"skey","pullTimes":"4"}}`)
 	req = httptest.NewRequest(http.MethodPost, "/api/proxy-groups", body)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -379,6 +380,50 @@ func TestProxyAPIsAndBusyGuard(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &apiGroup); err != nil {
 		t.Fatalf("decode api proxy group: %v", err)
 	}
+	if apiGroup.APIConfig["pullTimes"] != "4" {
+		t.Fatalf("api pullTimes = %q, want 4", apiGroup.APIConfig["pullTimes"])
+	}
+
+	body = bytes.NewBufferString(`{"name":"坏API代理组","type":"api","apiProvider":"kuaidaili_dps","apiConfig":{"secretId":"sid","secretKey":"skey","pullTimes":"0"}}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/proxy-groups", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "提取次数") {
+		t.Fatalf("create invalid api proxy group status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+
+	originalPull := pullKuaidailiDPS
+	originalTest := testProxyNode
+	pullCalls := 0
+	pullKuaidailiDPS = func(context.Context, model.ProxyGroup) ([]model.ProxyNodeInput, error) {
+		pullCalls++
+		return []model.ProxyNodeInput{{
+			Name:     "API 节点",
+			Protocol: model.ProxyProtocolHTTP,
+			Host:     "127.0.0.1",
+			Port:     18080,
+		}}, nil
+	}
+	testProxyNode = func(context.Context, model.ProxyNode) (proxynet.TestResult, error) {
+		return proxynet.TestResult{LatencyMillis: 5, IPLocation: "当前 IP：127.0.0.1 来自于：本地"}, nil
+	}
+	t.Cleanup(func() {
+		pullKuaidailiDPS = originalPull
+		testProxyNode = originalTest
+	})
+	req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/proxy-groups/%d/pull-test", apiGroup.ID), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp = httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("pull-test api proxy group status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	if pullCalls != 1 {
+		t.Fatalf("pull-test calls = %d, want 1", pullCalls)
+	}
+
 	body = bytes.NewBufferString(`{"name":"节点2","protocol":"http","host":"127.0.0.1","port":8081}`)
 	req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/proxy-groups/%d/nodes", apiGroup.ID), body)
 	req.Header.Set("Content-Type", "application/json")

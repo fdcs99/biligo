@@ -46,6 +46,7 @@ const (
 	saleStartWarmupBefore         = 30 * time.Second
 	saleStartWarmupRequestCount   = 5
 	defaultProxyAPIPullBefore     = 5 * time.Minute
+	proxyAPIPullMaxAttempts       = 3
 	createOrderAttemptsPerPrepare = 4
 )
 
@@ -998,6 +999,13 @@ func (p *taskProxyRuntime) pullBefore() time.Duration {
 	return time.Duration(minutes) * time.Minute
 }
 
+func (p *taskProxyRuntime) pullTimes() int {
+	if p == nil || p.group.APIConfig == nil {
+		return model.DefaultProxyAPIPullTimes
+	}
+	return model.NormalizeProxyAPIPullTimes(p.group.APIConfig["pullTimes"])
+}
+
 func (p *taskProxyRuntime) pullAndActivate(ctx context.Context) error {
 	if p == nil {
 		return nil
@@ -1009,9 +1017,7 @@ func (p *taskProxyRuntime) pullAndActivate(ctx context.Context) error {
 		return errors.New("API 代理组仅支持快代理私密代理")
 	}
 	p.triedAt = time.Now()
-	pullCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	nodes, err := pullKuaidailiDPS(pullCtx, p.group)
-	cancel()
+	nodes, err := p.pullAPIProxyNodes(ctx)
 	if err != nil {
 		_, _ = p.manager.store.SetProxyGroupPullResult(context.Background(), p.group.ID, "error", err.Error())
 		return err
@@ -1019,7 +1025,11 @@ func (p *taskProxyRuntime) pullAndActivate(ctx context.Context) error {
 	if _, err := p.manager.store.ReplaceAPIProxyNodes(context.Background(), p.group.ID, nodes); err != nil {
 		return err
 	}
-	group, err := p.manager.store.SetProxyGroupPullResult(context.Background(), p.group.ID, "success", fmt.Sprintf("已拉取 %d 个代理节点。", len(nodes)))
+	message := fmt.Sprintf("已拉取 %d 个代理节点。", len(nodes))
+	if pullTimes := p.pullTimes(); pullTimes > 1 {
+		message = fmt.Sprintf("已完成 %d 次提取，合并 %d 个代理节点。", pullTimes, len(nodes))
+	}
+	group, err := p.manager.store.SetProxyGroupPullResult(context.Background(), p.group.ID, "success", message)
 	if err == nil {
 		p.group = group
 	}
@@ -1028,6 +1038,64 @@ func (p *taskProxyRuntime) pullAndActivate(ctx context.Context) error {
 		return err
 	}
 	return p.activateIndex(0)
+}
+
+func (p *taskProxyRuntime) pullAPIProxyNodes(ctx context.Context) ([]model.ProxyNodeInput, error) {
+	pullTimes := p.pullTimes()
+	nodes := make([]model.ProxyNodeInput, 0)
+	seen := make(map[string]struct{})
+	var lastErr error
+
+	for success := 1; success <= pullTimes; success++ {
+		pulled := false
+		for attempt := 1; attempt <= proxyAPIPullMaxAttempts; attempt++ {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			pullCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			pulledNodes, err := pullKuaidailiDPS(pullCtx, p.group)
+			cancel()
+			if err != nil {
+				lastErr = err
+				p.manager.setRuntime(p.taskID, "waiting_start", fmt.Sprintf("代理 API 第 %d/%d 次提取失败（尝试 %d/%d）：%s", success, pullTimes, attempt, proxyAPIPullMaxAttempts, err.Error()), "warn")
+				continue
+			}
+			before := len(nodes)
+			for _, node := range pulledNodes {
+				key := proxyNodeInputDedupKey(node)
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				nodes = append(nodes, node)
+			}
+			if pullTimes > 1 {
+				p.manager.setRuntime(p.taskID, "waiting_start", fmt.Sprintf("代理 API 第 %d/%d 次提取成功，新增 %d 个代理节点。", success, pullTimes, len(nodes)-before), "info")
+			}
+			pulled = true
+			break
+		}
+		if !pulled {
+			if lastErr != nil {
+				return nil, fmt.Errorf("代理 API 第 %d/%d 次提取失败，已尝试 %d 次：%w", success, pullTimes, proxyAPIPullMaxAttempts, lastErr)
+			}
+			return nil, fmt.Errorf("代理 API 第 %d/%d 次提取失败，已尝试 %d 次", success, pullTimes, proxyAPIPullMaxAttempts)
+		}
+	}
+	if len(nodes) == 0 {
+		return nil, errors.New("代理 API 提取成功但未返回代理节点")
+	}
+	return nodes, nil
+}
+
+func proxyNodeInputDedupKey(node model.ProxyNodeInput) string {
+	return strings.Join([]string{
+		model.NormalizeProxyProtocol(node.Protocol),
+		strings.ToLower(strings.TrimSpace(node.Host)),
+		strconv.Itoa(node.Port),
+		strings.TrimSpace(node.Username),
+		strings.TrimSpace(node.Password),
+	}, "\x00")
 }
 
 func (p *taskProxyRuntime) ensureReady(ctx context.Context) error {

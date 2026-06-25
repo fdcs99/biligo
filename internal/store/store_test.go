@@ -344,8 +344,28 @@ func TestProxyStoreCRUDAndTaskReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateProxyGroup: %v", err)
 	}
-	if group.ID == 0 || group.Type != model.ProxyGroupTypeAPI || group.APIConfig["secretId"] != "sid" || group.APIConfig["pullBeforeMinutes"] != "3" {
+	if group.ID == 0 || group.Type != model.ProxyGroupTypeAPI || group.APIConfig["secretId"] != "sid" || group.APIConfig["pullBeforeMinutes"] != "3" || group.APIConfig["pullTimes"] != "1" {
 		t.Fatalf("unexpected proxy group: %#v", group)
+	}
+	group, err = store.UpdateProxyGroup(context.Background(), group.ID, model.ProxyGroupInput{
+		Name:        "快代理",
+		Type:        model.ProxyGroupTypeAPI,
+		APIProvider: model.ProxyProviderKuaidailiDPS,
+		APIConfig: map[string]string{
+			"secretId":          "sid",
+			"secretKey":         "skey",
+			"signType":          "hmacsha1",
+			"num":               "2",
+			"pullTimes":         "7",
+			"pullBeforeMinutes": "3",
+			"proxyProtocol":     "http",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateProxyGroup: %v", err)
+	}
+	if group.APIConfig["pullTimes"] != "7" {
+		t.Fatalf("pullTimes = %q, want 7", group.APIConfig["pullTimes"])
 	}
 	node, err := store.CreateProxyNode(context.Background(), group.ID, model.ProxyNodeInput{
 		Name:     "节点",

@@ -262,7 +262,7 @@ func isLikelyPort(value string) bool {
 
 func isReservedKuaidailiConfigKey(key string) bool {
 	switch key {
-	case "secretId", "secretKey", "secretToken", "signType", "num", "proxyProtocol", "protocol":
+	case "secretId", "secretKey", "secretToken", "signType", "num", "pullTimes", "pullBeforeMinutes", "proxyProtocol", "protocol":
 		return true
 	default:
 		return false

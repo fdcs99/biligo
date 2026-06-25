@@ -1,6 +1,9 @@
 package model
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 const (
 	TimeSyncStrategyBilibili = "bilibili"
@@ -32,6 +35,8 @@ const (
 	DurationModeUnlimited = "unlimited"
 
 	DefaultRushDurationSeconds = 600
+	DefaultProxyAPIPullTimes   = 1
+	MaxProxyAPIPullTimes       = 20
 )
 
 type Health struct {
@@ -455,6 +460,26 @@ func NormalizeProxyProvider(provider string) string {
 	default:
 		return ""
 	}
+}
+
+func ParseProxyAPIPullTimes(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return DefaultProxyAPIPullTimes, true
+	}
+	times, err := strconv.Atoi(value)
+	if err != nil || times < DefaultProxyAPIPullTimes || times > MaxProxyAPIPullTimes {
+		return DefaultProxyAPIPullTimes, false
+	}
+	return times, true
+}
+
+func NormalizeProxyAPIPullTimes(value string) int {
+	times, ok := ParseProxyAPIPullTimes(value)
+	if !ok {
+		return DefaultProxyAPIPullTimes
+	}
+	return times
 }
 
 func NormalizeProxyProtocol(protocol string) string {

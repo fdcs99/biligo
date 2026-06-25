@@ -125,6 +125,7 @@ const proxyGroupForm = reactive<ProxyGroupInput>({
     secretKey: '',
     signType: 'hmacsha1',
     num: '5',
+    pullTimes: '1',
     pullBeforeMinutes: '5',
     proxyProtocol: 'http',
   },
@@ -855,6 +856,7 @@ function resetProxyGroupForm() {
       secretKey: '',
       signType: 'hmacsha1',
       num: '5',
+      pullTimes: '1',
       pullBeforeMinutes: '5',
       proxyProtocol: 'http',
     },
@@ -902,6 +904,7 @@ function editProxyGroup(group: ProxyGroup) {
       secretToken: group.apiConfig?.secretToken ?? '',
       signType: group.apiConfig?.signType ?? 'hmacsha1',
       num: group.apiConfig?.num ?? '5',
+      pullTimes: group.apiConfig?.pullTimes ?? '1',
       pullBeforeMinutes: group.apiConfig?.pullBeforeMinutes ?? '5',
       proxyProtocol: group.apiConfig?.proxyProtocol ?? 'http',
       area: group.apiConfig?.area ?? '',
@@ -2503,7 +2506,7 @@ onUnmounted(() => {
                 </el-col>
               </el-row>
               <el-row :gutter="12">
-                <el-col :xs="24" :sm="8">
+                <el-col :xs="24" :sm="12">
                   <el-form-item label="鉴权方式">
                     <el-select v-model="proxyGroupForm.apiConfig.signType">
                       <el-option value="hmacsha1" label="HMAC-SHA1" />
@@ -2512,17 +2515,31 @@ onUnmounted(() => {
                     </el-select>
                   </el-form-item>
                 </el-col>
-                <el-col :xs="24" :sm="8">
-                  <el-form-item label="提取数量">
-                    <el-input v-model="proxyGroupForm.apiConfig.num" placeholder="5" clearable />
-                  </el-form-item>
-                </el-col>
-                <el-col :xs="24" :sm="8">
+                <el-col :xs="24" :sm="12">
                   <el-form-item label="提前提取（分钟）">
                     <el-input v-model="proxyGroupForm.apiConfig.pullBeforeMinutes" placeholder="5" clearable />
                   </el-form-item>
                 </el-col>
               </el-row>
+              <el-row :gutter="12">
+                <el-col :xs="24" :sm="12">
+                  <el-form-item label="提取数量">
+                    <el-input v-model="proxyGroupForm.apiConfig.num" placeholder="5" clearable />
+                  </el-form-item>
+                </el-col>
+                <el-col :xs="24" :sm="12">
+                  <el-form-item label="提取次数">
+                    <el-input v-model="proxyGroupForm.apiConfig.pullTimes" placeholder="1" clearable />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-alert
+                type="info"
+                show-icon
+                :closable="false"
+                class="form-tip-alert"
+                title="提取次数只影响任务执行时的代理准备；拉取检测仍只提取 1 次。"
+              />
               <el-row :gutter="12">
                 <el-col :xs="24" :sm="12">
                   <el-form-item label="代理协议">
