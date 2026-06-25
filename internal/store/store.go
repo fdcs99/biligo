@@ -1528,7 +1528,6 @@ func normalizeTaskInput(input model.TaskInput) model.TaskInput {
 	if input.TaskMode == model.TaskModeRestock {
 		input.ProxyGroupID = 0
 		input.ProxyMode = model.ProxyModeRoundRobin
-		input.SuperMode = false
 	}
 	if input.ProxyGroupID <= 0 {
 		input.ProxyMode = model.ProxyModeRoundRobin

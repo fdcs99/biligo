@@ -134,6 +134,48 @@ func TestCreateTaskPersistsFullPurchaseConfig(t *testing.T) {
 		t.Fatalf("updated stage poll intervals = %d/%d, want 120/450", task.RushPollIntervalMillis, task.RestockPollIntervalMillis)
 	}
 
+	task, err = store.UpdateTask(context.Background(), task.ID, model.TaskInput{
+		Name:                      task.Name,
+		AccountID:                 task.AccountID,
+		ProjectID:                 task.ProjectID,
+		ProjectName:               task.ProjectName,
+		ScreenID:                  task.ScreenID,
+		SKUID:                     task.SKUID,
+		SessionName:               task.SessionName,
+		TicketLevel:               task.TicketLevel,
+		TicketDisplay:             task.TicketDisplay,
+		TicketPrice:               task.TicketPrice,
+		SaleStart:                 task.SaleStart,
+		SaleStatus:                task.SaleStatus,
+		LinkID:                    task.LinkID,
+		IsHotProject:              task.IsHotProject,
+		SuperMode:                 true,
+		TaskMode:                  model.TaskModeRestock,
+		DurationMode:              model.DurationModeUnlimited,
+		SelectedTickets:           task.SelectedTickets,
+		RushDurationSeconds:       task.RushDurationSeconds,
+		OrderType:                 task.OrderType,
+		PayMoney:                  task.PayMoney,
+		BuyerInfo:                 task.BuyerInfo,
+		Buyer:                     task.Buyer,
+		Tel:                       task.Tel,
+		DeliverInfo:               task.DeliverInfo,
+		Phone:                     task.Phone,
+		TimeSyncStrategy:          task.TimeSyncStrategy,
+		Quantity:                  task.Quantity,
+		StartAt:                   task.StartAt,
+		EndAt:                     task.EndAt,
+		PollIntervalMillis:        task.PollIntervalMillis,
+		RushPollIntervalMillis:    task.RushPollIntervalMillis,
+		RestockPollIntervalMillis: task.RestockPollIntervalMillis,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask restock super mode: %v", err)
+	}
+	if task.TaskMode != model.TaskModeRestock || !task.SuperMode {
+		t.Fatalf("restock task mode/superMode = %q/%v, want restock/true", task.TaskMode, task.SuperMode)
+	}
+
 	task, log, err := store.SetTaskTimeSync(context.Background(), task.ID, model.TimeSyncStrategyBilibili, 88, "2026-06-14T10:00:00+08:00", "时间同步完成")
 	if err != nil {
 		t.Fatalf("SetTaskTimeSync: %v", err)

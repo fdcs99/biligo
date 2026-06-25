@@ -351,6 +351,7 @@ func (m *Manager) runHybrid(ctx context.Context, taskID int64, cookie string, ta
 
 func (m *Manager) runRestock(ctx context.Context, taskID int64, cookie string, task model.Task) {
 	interval := restockPollInterval(task)
+	superRuntime := newSuperModeRuntime(task)
 
 	var deadlineExceeded func() bool
 	if model.NormalizeDurationMode(task.DurationMode) == model.DurationModeLimited {
@@ -395,7 +396,7 @@ func (m *Manager) runRestock(ctx context.Context, taskID int64, cookie string, t
 				m.setRuntimeWithCheckedAt(taskID, "running", formatRetryMessage("更新命中票种失败："+err.Error()), "warn", checkedAt)
 			} else {
 				m.publishTaskAndLog(matchedTask, log)
-				switch m.runRestockOrderAttempt(ctx, taskID, cookie, deadlineExceeded, nil) {
+				switch m.runRestockOrderAttempt(ctx, taskID, cookie, deadlineExceeded, nil, superRuntime) {
 				case orderAttemptFinished, orderAttemptStopped:
 					return
 				}
@@ -771,11 +772,11 @@ const (
 	orderAttemptStopped
 )
 
-func (m *Manager) runRestockOrderAttempt(ctx context.Context, taskID int64, cookie string, deadlineExceeded func() bool, proxyRuntime *taskProxyRuntime) orderAttemptResult {
-	return m.runOrderAttempt(ctx, taskID, cookie, deadlineExceeded, proxyRuntime, restockCreateAttemptsAfterDetection)
+func (m *Manager) runRestockOrderAttempt(ctx context.Context, taskID int64, cookie string, deadlineExceeded func() bool, proxyRuntime *taskProxyRuntime, superRuntime *superModeRuntime) orderAttemptResult {
+	return m.runOrderAttempt(ctx, taskID, cookie, deadlineExceeded, proxyRuntime, superRuntime, restockCreateAttemptsAfterDetection)
 }
 
-func (m *Manager) runOrderAttempt(ctx context.Context, taskID int64, cookie string, deadlineExceeded func() bool, proxyRuntime *taskProxyRuntime, maxCreateAttempts int) orderAttemptResult {
+func (m *Manager) runOrderAttempt(ctx context.Context, taskID int64, cookie string, deadlineExceeded func() bool, proxyRuntime *taskProxyRuntime, superRuntime *superModeRuntime, maxCreateAttempts int) orderAttemptResult {
 	if maxCreateAttempts <= 0 {
 		maxCreateAttempts = createOrderAttemptsPerPrepare
 	}
@@ -801,7 +802,7 @@ prepareLoop:
 		}
 		checkedAt := checkedAtText()
 
-		client := m.ticketClient(proxyRuntime)
+		client := m.orderTicketClient(proxyRuntime, superRuntime)
 		prepared, err := client.PrepareOrder(ctx, latestTask, cookie)
 		if err != nil {
 			m.setRuntimeWithCheckedAt(taskID, "running", formatReturnToDetectMessage("订单准备失败："+err.Error()), "warn", checkedAt)
@@ -834,6 +835,10 @@ prepareLoop:
 					m.applyPayMoneyUpdate(taskID, latestTask.PayMoney, result.PayMoney)
 					continue prepareLoop
 				}
+				if switched, reason, from, to := switchSuperModeRuntime(superRuntime, result, createErr); switched {
+					m.setRuntime(taskID, "running", superModeSwitchMessage(reason, from, to), "warn")
+					continue prepareLoop
+				}
 				if shouldWaitForNoProxyCreate412(result, createErr, proxyRuntime) {
 					m.setRuntimeWithCheckedAt(taskID, "running", formatRetryMessage("创建订单失败："+createErr.Error()), "warn", checkedAt)
 					if !m.wait(ctx, noProxyCreate412RetryWait) {
@@ -854,7 +859,7 @@ prepareLoop:
 			}
 
 			interval := restockPollInterval(latestTask)
-			payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, "failed", "已超过任务结束时间，停止获取支付参数。", "warn", proxyRuntime, nil)
+			payParam, ok := m.waitForPayParam(ctx, taskID, result.OrderID, cookie, interval, deadlineExceeded, "failed", "已超过任务结束时间，停止获取支付参数。", "warn", proxyRuntime, superRuntime)
 			if !ok {
 				return orderAttemptStopped
 			}
@@ -926,7 +931,7 @@ func newSuperModeRuntime(task model.Task) *superModeRuntime {
 		return nil
 	}
 	taskMode := model.NormalizeTaskMode(task.TaskMode)
-	if taskMode != model.TaskModeRush && taskMode != model.TaskModeHybrid {
+	if taskMode != model.TaskModeRush && taskMode != model.TaskModeRestock && taskMode != model.TaskModeHybrid {
 		return nil
 	}
 	baseURLs := make([]string, 0, len(superModeBaseURLs))

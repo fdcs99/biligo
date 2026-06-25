@@ -1369,6 +1369,93 @@ func TestRunnerSuperModeSwitchesBaseURLOnCreateBodyRiskCode(t *testing.T) {
 	}
 }
 
+func TestRestockModeSuperModeSwitchesBaseURLOnCreateRiskCode(t *testing.T) {
+	var firstPrepareCalls atomic.Int32
+	var firstCreateCalls atomic.Int32
+	var secondPrepareCalls atomic.Int32
+	var secondCreateCalls atomic.Int32
+	firstServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			writeRunnerJSON(t, w, ticketDetailPayload(true))
+		case "/api/ticket/linkgoods/list":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
+		case "/api/ticket/order/prepare":
+			firstPrepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token-first"}})
+		case "/api/ticket/order/createV2":
+			firstCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 412, "message": "risk"})
+		default:
+			t.Fatalf("unexpected first restock supermode path: %s", r.URL.Path)
+		}
+	}))
+	defer firstServer.Close()
+	secondServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/ticket/order/prepare":
+			secondPrepareCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token-second"}})
+		case "/api/ticket/order/createV2":
+			secondCreateCalls.Add(1)
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "ORDER-RESTOCK-SUPER", "pay_money": 68000}})
+		case "/api/ticket/order/getPayParam":
+			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"code_url": "https://pay.example.test/order/ORDER-RESTOCK-SUPER"}})
+		default:
+			t.Fatalf("unexpected second restock supermode path: %s", r.URL.Path)
+		}
+	}))
+	defer secondServer.Close()
+	thirdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("third restock supermode server should not be used: %s", r.URL.Path)
+	}))
+	defer thirdServer.Close()
+
+	originalBaseURLs := superModeBaseURLs
+	superModeBaseURLs = []string{firstServer.URL, secondServer.URL, thirdServer.URL}
+	t.Cleanup(func() {
+		superModeBaseURLs = originalBaseURLs
+	})
+
+	taskStore, task := createRestockTask(t, model.DurationModeUnlimited, "")
+	defer taskStore.Close()
+	task = updateTaskSuperMode(t, taskStore, task, true)
+
+	manager := NewManagerWithTimeSync(taskStore, biliticket.NewClientWithBaseURL(firstServer.Client(), firstServer.URL), events.NewHub(), fakeTimeSync{})
+	if _, err := manager.Dispatch(context.Background(), task.ID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	updated := waitForTaskStatus(t, taskStore, task.ID, "waiting_payment")
+	if updated.OrderID != "ORDER-RESTOCK-SUPER" {
+		t.Fatalf("OrderID = %q, want ORDER-RESTOCK-SUPER", updated.OrderID)
+	}
+	if firstPrepareCalls.Load() != 1 || firstCreateCalls.Load() != 1 {
+		t.Fatalf("first server calls prepare/create = %d/%d, want 1/1", firstPrepareCalls.Load(), firstCreateCalls.Load())
+	}
+	if secondPrepareCalls.Load() != 1 || secondCreateCalls.Load() != 1 {
+		t.Fatalf("second server calls prepare/create = %d/%d, want 1/1", secondPrepareCalls.Load(), secondCreateCalls.Load())
+	}
+	logs, err := taskStore.ListTaskLogs(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("ListTaskLogs: %v", err)
+	}
+	foundSwitchLog := false
+	for _, log := range logs {
+		if strings.Contains(log.Message, "SuperMode 检测到 createV2 返回 412") &&
+			strings.Contains(log.Message, "已将订单域名从") &&
+			strings.Contains(log.Message, "重新准备订单") {
+			foundSwitchLog = true
+			break
+		}
+	}
+	if !foundSwitchLog {
+		t.Fatalf("restock supermode switch log not found: %#v", logs)
+	}
+}
+
 func TestRunnerSwitchesProxyOnCreateV2RiskCodes(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -1200,7 +1200,6 @@ function normalizeTaskModeFields() {
   if (!hasRushTaskSection.value) {
     taskForm.proxyGroupId = 0
     taskForm.proxyMode = 'round_robin'
-    taskForm.superMode = false
   }
   if (Number(taskForm.proxyGroupId || 0) <= 0) {
     taskForm.proxyMode = 'round_robin'
@@ -2960,12 +2959,12 @@ onUnmounted(() => {
                 </el-form-item>
               </el-col>
             </template>
-            <el-col v-if="hasRushTaskSection" :xs="24" :sm="12">
+            <el-col v-if="hasRushTaskSection || hasRestockTaskSection" :xs="24" :sm="12">
               <el-form-item>
                 <template #label>
                   <el-tooltip
                     placement="top"
-                    content="开启后，遇到 412 或 3 会自动切换域名，尝试降低 412 出现概率。"
+                    content="开启后，抢票或回流下单阶段遇到 412 或 3 会自动切换域名，尝试降低 412 出现概率。"
                   >
                     <span class="tooltip-label">SuperMode</span>
                   </el-tooltip>
