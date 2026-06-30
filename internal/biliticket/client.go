@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"sort"
@@ -58,10 +60,12 @@ type Client struct {
 }
 
 type OrderPrepareResult struct {
-	Token         string
-	PToken        string
-	Raw           map[string]any
-	cTokenSession cTokenSession
+	Token          string
+	PToken         string
+	Raw            map[string]any
+	cTokenSession  cTokenSession
+	createPayload  map[string]any
+	createEndpoint string
 }
 
 type OrderCreateResult struct {
@@ -110,6 +114,8 @@ type projectPayload struct {
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = newKeepAliveHTTPClient()
+	} else {
+		httpClient = withCookieJar(httpClient)
 	}
 	return &Client{
 		httpClient:   httpClient,
@@ -127,10 +133,25 @@ func newKeepAliveHTTPClient() *http.Client {
 	transport.MaxIdleConns = 100
 	transport.MaxIdleConnsPerHost = 20
 	transport.IdleConnTimeout = 90 * time.Second
+	jar, _ := cookiejar.New(nil)
 	return &http.Client{
 		Timeout:   15 * time.Second,
 		Transport: transport,
+		Jar:       jar,
 	}
+}
+
+func withCookieJar(httpClient *http.Client) *http.Client {
+	if httpClient == nil {
+		return newKeepAliveHTTPClient()
+	}
+	if httpClient.Jar != nil {
+		return httpClient
+	}
+	clone := *httpClient
+	jar, _ := cookiejar.New(nil)
+	clone.Jar = jar
+	return &clone
 }
 
 func NewClientWithBaseURL(httpClient *http.Client, baseURL string) *Client {
@@ -147,6 +168,8 @@ func NewClientWithBaseURL(httpClient *http.Client, baseURL string) *Client {
 func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = newKeepAliveHTTPClient()
+	} else {
+		httpClient = withCookieJar(httpClient)
 	}
 	if c == nil {
 		return NewClient(httpClient)
@@ -367,6 +390,9 @@ func (c *Client) WarmupShow(ctx context.Context, count int) error {
 }
 
 func (c *Client) PrepareOrder(ctx context.Context, task model.Task, cookie string) (OrderPrepareResult, error) {
+	if task.IsHotProject {
+		c.ensureKfcTime(ctx, task, cookie)
+	}
 	payload := map[string]any{
 		"count":              task.Quantity,
 		"screen_id":          task.ScreenID,
@@ -403,19 +429,63 @@ func (c *Client) PrepareOrder(ctx context.Context, task model.Task, cookie strin
 	if token == "" {
 		return OrderPrepareResult{Raw: response}, errors.New("订单准备响应缺少 token")
 	}
-	return OrderPrepareResult{
+	prepared := OrderPrepareResult{
 		Token:         token,
 		PToken:        normalizePreparePToken(stringValue(data["ptoken"])),
 		Raw:           response,
 		cTokenSession: cTokenSession,
-	}, nil
+	}
+	createPayload, createEndpoint, err := c.buildCreateRequest(task, prepared)
+	if err != nil {
+		return OrderPrepareResult{Raw: response}, err
+	}
+	prepared.createPayload = createPayload
+	prepared.createEndpoint = createEndpoint
+	return prepared, nil
 }
 
-func (c *Client) CreateOrder(ctx context.Context, task model.Task, cookie string, prepared OrderPrepareResult) (OrderCreateResult, error) {
+func (c *Client) ensureKfcTime(ctx context.Context, task model.Task, cookie string) {
+	if task.ProjectID <= 0 || cookieHeaderHasName(cookie, "kfcTime") || c.jarHasCookieName(c.showBaseURL, "kfcTime") {
+		return
+	}
+	_, _ = c.fetchProjectPayloadNew(ctx, task.ProjectID, cookie)
+}
+
+func (c *Client) jarHasCookieName(baseURL string, name string) bool {
+	if c == nil || c.httpClient == nil || c.httpClient.Jar == nil {
+		return false
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	for _, cookie := range c.httpClient.Jar.Cookies(parsed) {
+		if cookie.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func cookieHeaderHasName(cookieHeader string, name string) bool {
+	req, err := http.NewRequest(http.MethodGet, "https://biligo.local/", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Cookie", cookieHeader)
+	for _, cookie := range req.Cookies() {
+		if cookie.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) buildCreateRequest(task model.Task, prepared OrderPrepareResult) (map[string]any, string, error) {
 	nowMs := time.Now().UnixMilli()
 	payload, err := buildOrderPayload(task, prepared.Token, nowMs)
 	if err != nil {
-		return OrderCreateResult{}, err
+		return nil, "", err
 	}
 	orderCreateURL := c.showBaseURL + "/api/ticket/order/createV2"
 	endpoint := fmt.Sprintf("%s?project_id=%d", orderCreateURL, task.ProjectID)
@@ -424,13 +494,25 @@ func (c *Client) CreateOrder(ctx context.Context, task model.Task, cookie string
 		if cTokenSession.isZero() {
 			cTokenSession = newCTokenSession(task.ProjectID, ticketUserAgent, nowMs, c.cTokenWindow)
 		}
-		payload["clickPosition"] = c.clickPosition(nowMs)
 		payload["ctoken"] = cTokenSession.generateCreateAt(nowMs)
 	}
 	if task.IsHotProject || prepared.PToken != "" {
 		payload["ptoken"] = prepared.PToken
 		payload["orderCreateUrl"] = orderCreateURL
 		endpoint += "&ptoken=" + url.QueryEscape(prepared.PToken)
+	}
+	return payload, endpoint, nil
+}
+
+func (c *Client) CreateOrder(ctx context.Context, task model.Task, cookie string, prepared OrderPrepareResult) (OrderCreateResult, error) {
+	payload := prepared.createPayload
+	endpoint := prepared.createEndpoint
+	if payload == nil || endpoint == "" {
+		var err error
+		payload, endpoint, err = c.buildCreateRequest(task, prepared)
+		if err != nil {
+			return OrderCreateResult{}, err
+		}
 	}
 
 	var response map[string]any
@@ -451,19 +533,6 @@ func (c *Client) CreateOrder(ctx context.Context, task model.Task, cookie string
 		return result, createV2Error(response)
 	}
 	return result, nil
-}
-
-func (c *Client) clickPosition(nowMs int64) map[string]any {
-	originMs := c.createTimeMs
-	if originMs <= 0 {
-		originMs = nowMs
-	}
-	return map[string]any{
-		"x":      randIntInclusive(400, 900),
-		"y":      randIntInclusive(400, 900),
-		"origin": originMs,
-		"now":    nowMs,
-	}
 }
 
 func (c *Client) GetPayParam(ctx context.Context, orderID string, cookie string) (PayParamResult, error) {
@@ -664,11 +733,13 @@ func (c *Client) fetchAddresses(ctx context.Context, cookie string) ([]model.Tic
 
 func (c *Client) doJSON(ctx context.Context, method string, endpoint string, body any, cookie string, headers map[string]string, target any) error {
 	var reader io.Reader
+	var requestBody []byte
 	if body != nil {
 		buffer := &bytes.Buffer{}
 		if err := json.NewEncoder(buffer).Encode(body); err != nil {
 			return err
 		}
+		requestBody = append([]byte(nil), buffer.Bytes()...)
 		reader = buffer
 	}
 
@@ -684,15 +755,24 @@ func (c *Client) doJSON(ctx context.Context, method string, endpoint string, bod
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if cookie != "" {
-		req.Header.Set("Cookie", cookie)
+		if !c.seedRequestCookies(req.URL, cookie) {
+			req.Header.Set("Cookie", cookie)
+		}
 	}
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
 
+	if label := orderDebugLabel(endpoint); label != "" {
+		logOrderRequest(label, c, req, requestBody)
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
+	}
+	if label := orderDebugLabel(endpoint); label != "" {
+		log.Printf("%s response: proto=%s status=%d", label, resp.Proto, resp.StatusCode)
 	}
 	defer drainAndClose(resp.Body)
 
@@ -712,6 +792,79 @@ func (c *Client) doJSON(ctx context.Context, method string, endpoint string, bod
 		}
 	}
 	return nil
+}
+
+func orderDebugLabel(endpoint string) string {
+	switch {
+	case strings.Contains(endpoint, "/api/ticket/order/prepare"):
+		return "prepare"
+	case strings.Contains(endpoint, "/api/ticket/order/createV2"):
+		return "createV2"
+	default:
+		return ""
+	}
+}
+
+func (c *Client) seedRequestCookies(endpoint *url.URL, cookieHeader string) bool {
+	if c == nil || c.httpClient == nil || c.httpClient.Jar == nil || endpoint == nil {
+		return false
+	}
+	req, err := http.NewRequest(http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Cookie", cookieHeader)
+	cookies := req.Cookies()
+	if len(cookies) == 0 {
+		return false
+	}
+	c.httpClient.Jar.SetCookies(endpoint, cookies)
+	return true
+}
+
+func logOrderRequest(label string, c *Client, req *http.Request, body []byte) {
+	if req == nil {
+		return
+	}
+	headers := make(map[string][]string)
+	for key, values := range req.Header {
+		if strings.EqualFold(key, "Cookie") || strings.EqualFold(key, "Authorization") {
+			continue
+		}
+		headers[key] = append([]string(nil), values...)
+	}
+	headersJSON, _ := json.MarshalIndent(headers, "", "  ")
+	log.Printf("%s url: %s", label, req.URL.String())
+	log.Printf("%s headers: %s", label, string(headersJSON))
+	log.Printf("%s cookie_names: %v", label, requestCookieNames(c, req))
+	if len(body) > 0 {
+		log.Printf("%s body: %s", label, strings.TrimSpace(string(body)))
+	}
+}
+
+func requestCookieNames(c *Client, req *http.Request) []string {
+	if req == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	for _, cookie := range req.Cookies() {
+		if cookie.Name != "" {
+			seen[cookie.Name] = struct{}{}
+		}
+	}
+	if c != nil && c.httpClient != nil && c.httpClient.Jar != nil {
+		for _, cookie := range c.httpClient.Jar.Cookies(req.URL) {
+			if cookie.Name != "" {
+				seen[cookie.Name] = struct{}{}
+			}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (c *Client) doHead(ctx context.Context, endpoint string) error {
@@ -913,22 +1066,23 @@ func buildOrderPayload(task model.Task, token string, nowMs int64) (map[string]a
 		return nil, err
 	}
 	payload := map[string]any{
-		"again":         1,
-		"count":         task.Quantity,
-		"screen_id":     task.ScreenID,
-		"project_id":    task.ProjectID,
-		"sku_id":        task.SKUID,
-		"order_type":    firstPositiveInt(int64(task.OrderType), 1),
-		"pay_money":     task.PayMoney,
-		"buyer_info":    string(buyerInfo),
-		"buyer":         task.Buyer,
-		"tel":           task.Tel,
-		"deliver_info":  string(deliverInfo),
-		"phone":         task.Phone,
-		"token":         token,
-		"timestamp":     nowMs,
-		"newRisk":       true,
-		"requestSource": "neul-next",
+		"again":          1,
+		"count":          task.Quantity,
+		"screen_id":      task.ScreenID,
+		"project_id":     strconv.FormatInt(task.ProjectID, 10),
+		"is_hot_project": task.IsHotProject,
+		"sku_id":         task.SKUID,
+		"order_type":     firstPositiveInt(int64(task.OrderType), 1),
+		"pay_money":      task.PayMoney,
+		"buyer_info":     string(buyerInfo),
+		"buyer":          task.Buyer,
+		"tel":            task.Tel,
+		"deliver_info":   string(deliverInfo),
+		"phone":          task.Phone,
+		"token":          token,
+		"timestamp":      nowMs,
+		"newRisk":        true,
+		"requestSource":  "neul-next",
 	}
 	if task.LinkID > 0 {
 		payload["link_id"] = task.LinkID

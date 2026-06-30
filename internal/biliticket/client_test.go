@@ -140,9 +140,13 @@ func TestDefaultBBRIsRetryableCreateWarning(t *testing.T) {
 func TestHotProjectOrderSendsCTokenAndPToken(t *testing.T) {
 	var prepareBody map[string]any
 	var createBody map[string]any
+	createBodies := make([]map[string]any, 0, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/mall-search-items/items_detail/info":
+			http.SetCookie(w, &http.Cookie{Name: "kfcTime", Value: "warm", Path: "/"})
+			writeJSON(t, w, mallProjectPayloadForTest(1001701))
 		case "/api/ticket/order/prepare":
 			if r.Method != http.MethodPost {
 				t.Fatalf("prepare method = %s, want POST", r.Method)
@@ -150,6 +154,7 @@ func TestHotProjectOrderSendsCTokenAndPToken(t *testing.T) {
 			if r.URL.Query().Get("project_id") != "1001701" {
 				t.Fatalf("prepare project_id = %q, want 1001701", r.URL.Query().Get("project_id"))
 			}
+			requireCookieValue(t, r, "kfcTime", "warm")
 			if err := json.NewDecoder(r.Body).Decode(&prepareBody); err != nil {
 				t.Fatalf("decode prepare body: %v", err)
 			}
@@ -167,9 +172,11 @@ func TestHotProjectOrderSendsCTokenAndPToken(t *testing.T) {
 			if r.URL.Query().Get("ptoken") != "preparedptoken" {
 				t.Fatalf("create query ptoken = %q, want preparedptoken", r.URL.Query().Get("ptoken"))
 			}
+			requireCookieValue(t, r, "kfcTime", "warm")
 			if err := json.NewDecoder(r.Body).Decode(&createBody); err != nil {
 				t.Fatalf("decode create body: %v", err)
 			}
+			createBodies = append(createBodies, cloneMap(createBody))
 			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"orderId": "order-1"}})
 		default:
 			t.Fatalf("unexpected request path: %s", r.URL.Path)
@@ -220,6 +227,16 @@ func TestHotProjectOrderSendsCTokenAndPToken(t *testing.T) {
 	if result.OrderID != "order-1" {
 		t.Fatalf("OrderID = %q, want order-1", result.OrderID)
 	}
+	if _, err := client.CreateOrder(context.Background(), task, "SESSDATA=test", prepared); err != nil {
+		t.Fatalf("CreateOrder second attempt: %v", err)
+	}
+	if len(createBodies) != 2 {
+		t.Fatalf("create calls = %d, want 2", len(createBodies))
+	}
+	if int64Value(createBodies[0]["timestamp"]) != int64Value(createBodies[1]["timestamp"]) ||
+		stringValue(createBodies[0]["ctoken"]) != stringValue(createBodies[1]["ctoken"]) {
+		t.Fatalf("create payload should be reused across attempts: %#v vs %#v", createBodies[0], createBodies[1])
+	}
 	createCToken := stringValue(createBody["ctoken"])
 	if createCToken == "" {
 		t.Fatalf("create ctoken is empty for hot project: %#v", createBody)
@@ -234,18 +251,17 @@ func TestHotProjectOrderSendsCTokenAndPToken(t *testing.T) {
 	if stringValue(createBody["orderCreateUrl"]) != server.URL+"/api/ticket/order/createV2" {
 		t.Fatalf("orderCreateUrl = %q", stringValue(createBody["orderCreateUrl"]))
 	}
+	if stringValue(createBody["project_id"]) != "1001701" {
+		t.Fatalf("create body project_id = %#v, want string 1001701", createBody["project_id"])
+	}
+	if !boolValue(createBody["is_hot_project"]) {
+		t.Fatalf("create body is_hot_project = %#v, want true", createBody["is_hot_project"])
+	}
 	if stringValue(createBody["requestSource"]) != "neul-next" || !boolValue(createBody["newRisk"]) {
 		t.Fatalf("create risk fields missing: %#v", createBody)
 	}
-	clickPosition, ok := mapValue(createBody["clickPosition"])
-	if !ok {
-		t.Fatalf("clickPosition missing: %#v", createBody)
-	}
-	if x, y := int64Value(clickPosition["x"]), int64Value(clickPosition["y"]); x < 400 || x > 900 || y < 400 || y > 900 {
-		t.Fatalf("clickPosition coordinates out of range: %#v", clickPosition)
-	}
-	if int64Value(clickPosition["origin"]) <= 0 || int64Value(clickPosition["now"]) <= 0 {
-		t.Fatalf("clickPosition timestamps missing: %#v", clickPosition)
+	if _, ok := createBody["clickPosition"]; ok {
+		t.Fatalf("clickPosition should not be sent: %#v", createBody["clickPosition"])
 	}
 }
 
@@ -284,6 +300,15 @@ func TestHotProjectCreateOrderKeepsEmptyPTokenFields(t *testing.T) {
 	}
 	if stringValue(createBody["orderCreateUrl"]) != server.URL+"/api/ticket/order/createV2" {
 		t.Fatalf("orderCreateUrl = %q", stringValue(createBody["orderCreateUrl"]))
+	}
+	if stringValue(createBody["project_id"]) != "1001701" {
+		t.Fatalf("create body project_id = %#v, want string 1001701", createBody["project_id"])
+	}
+	if !boolValue(createBody["is_hot_project"]) {
+		t.Fatalf("create body is_hot_project = %#v, want true", createBody["is_hot_project"])
+	}
+	if _, ok := createBody["clickPosition"]; ok {
+		t.Fatalf("clickPosition should not be sent: %#v", createBody["clickPosition"])
 	}
 }
 
@@ -604,6 +629,45 @@ func TestFormatUnixUsesChinaTime(t *testing.T) {
 	}
 	if got := formatUnix(instant.UnixMilli()); got != "2026-06-13 20:00:00" {
 		t.Fatalf("formatUnix millis = %q, want 2026-06-13 20:00:00", got)
+	}
+}
+
+func requireCookieValue(t *testing.T, r *http.Request, name string, want string) {
+	t.Helper()
+	cookie, err := r.Cookie(name)
+	if err != nil {
+		t.Fatalf("cookie %s missing in %q", name, r.Header.Get("Cookie"))
+	}
+	if cookie.Value != want {
+		t.Fatalf("cookie %s = %q, want %q", name, cookie.Value, want)
+	}
+}
+
+func mallProjectPayloadForTest(projectID int64) map[string]any {
+	return map[string]any{
+		"code":    0,
+		"success": true,
+		"data": map[string]any{
+			"projectId":   projectID,
+			"projectName": "测试项目",
+			"hotProject":  true,
+			"screenList": []map[string]any{
+				{
+					"id":         2001,
+					"name":       "晚场",
+					"start_time": 1781318224,
+					"ticket_list": []map[string]any{
+						{
+							"id":         3001,
+							"desc":       "VIP",
+							"price":      68000,
+							"sale_start": "2026-06-13 20:00:00",
+							"clickable":  true,
+						},
+					},
+				},
+			},
+		},
 	}
 }
 

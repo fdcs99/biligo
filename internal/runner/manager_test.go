@@ -467,6 +467,7 @@ func TestRunnerRefreshesHotProjectBeforeSaleStart(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		case "/mall-search-items/items_detail/info":
 			infoCalls.Add(1)
+			http.SetCookie(w, &http.Cookie{Name: "kfcTime", Value: "warm", Path: "/"})
 			writeRunnerJSON(t, w, ticketDetailPayloadWithHotProject(true, true))
 		case "/api/ticket/linkgoods/list":
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"list": []any{}}})
