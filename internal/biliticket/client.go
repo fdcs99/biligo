@@ -194,7 +194,7 @@ func (c *Client) WithShowBaseURL(baseURL string) *Client {
 		client.showBaseURL = baseURL
 		return client
 	}
-	return &Client{
+	next := &Client{
 		httpClient:   c.httpClient,
 		showBaseURL:  baseURL,
 		mallBaseURL:  c.mallBaseURL,
@@ -202,6 +202,8 @@ func (c *Client) WithShowBaseURL(baseURL string) *Client {
 		createTimeMs: c.createTimeMs,
 		cTokenWindow: c.cTokenWindow,
 	}
+	next.mirrorCookiesToBase(baseURL, c.cookieMirrorSourceBaseURLs(c.showBaseURL)...)
+	return next
 }
 
 func ExtractProjectID(projectInput string) (int64, error) {
@@ -391,7 +393,7 @@ func (c *Client) WarmupShow(ctx context.Context, count int) error {
 
 func (c *Client) PrepareOrder(ctx context.Context, task model.Task, cookie string) (OrderPrepareResult, error) {
 	if task.IsHotProject {
-		c.ensureKfcTime(ctx, task, cookie)
+		c.ensureOrderCookies(ctx, task, cookie)
 	}
 	payload := map[string]any{
 		"count":              task.Quantity,
@@ -444,11 +446,109 @@ func (c *Client) PrepareOrder(ctx context.Context, task model.Task, cookie strin
 	return prepared, nil
 }
 
-func (c *Client) ensureKfcTime(ctx context.Context, task model.Task, cookie string) {
-	if task.ProjectID <= 0 || cookieHeaderHasName(cookie, "kfcTime") || c.jarHasCookieName(c.showBaseURL, "kfcTime") {
+func (c *Client) ensureOrderCookies(ctx context.Context, task model.Task, cookie string) {
+	if task.ProjectID <= 0 {
+		return
+	}
+	c.seedBaseCookies(c.showBaseURL, cookie)
+	c.mirrorCookiesToBase(c.showBaseURL, c.cookieMirrorSourceBaseURLs()...)
+	if cookieHeaderHasName(cookie, "kfcTime") || c.jarHasCookieName(c.showBaseURL, "kfcTime") {
 		return
 	}
 	_, _ = c.fetchProjectPayloadNew(ctx, task.ProjectID, cookie)
+	c.mirrorCookiesToBase(c.showBaseURL, c.cookieMirrorSourceBaseURLs()...)
+}
+
+func (c *Client) seedBaseCookies(baseURL string, cookieHeader string) bool {
+	endpoint, ok := cookieBaseURL(baseURL)
+	if !ok {
+		return false
+	}
+	return c.seedRequestCookies(endpoint, cookieHeader)
+}
+
+func (c *Client) mirrorCookiesToBase(targetBaseURL string, sourceBaseURLs ...string) int {
+	if c == nil || c.httpClient == nil || c.httpClient.Jar == nil {
+		return 0
+	}
+	targetURL, ok := cookieBaseURL(targetBaseURL)
+	if !ok {
+		return 0
+	}
+	seen := make(map[string]struct{})
+	for _, cookie := range c.httpClient.Jar.Cookies(targetURL) {
+		if cookie.Name != "" {
+			seen[cookie.Name] = struct{}{}
+		}
+	}
+	mirrored := make([]*http.Cookie, 0)
+	for _, sourceBaseURL := range sourceBaseURLs {
+		sourceURL, ok := cookieBaseURL(sourceBaseURL)
+		if !ok || sameCookieHost(sourceURL, targetURL) {
+			continue
+		}
+		for _, cookie := range c.httpClient.Jar.Cookies(sourceURL) {
+			if cookie.Name == "" {
+				continue
+			}
+			if _, exists := seen[cookie.Name]; exists {
+				continue
+			}
+			mirrored = append(mirrored, &http.Cookie{
+				Name:  cookie.Name,
+				Value: cookie.Value,
+				Path:  "/",
+			})
+			seen[cookie.Name] = struct{}{}
+		}
+	}
+	if len(mirrored) == 0 {
+		return 0
+	}
+	c.httpClient.Jar.SetCookies(targetURL, mirrored)
+	return len(mirrored)
+}
+
+func (c *Client) cookieMirrorSourceBaseURLs(extra ...string) []string {
+	values := []string{c.mallBaseURL, c.showBaseURL, c.apiBaseURL, defaultMallBaseURL, defaultShowBaseURL, defaultAPIBaseURL}
+	values = append(values, extra...)
+	seen := make(map[string]struct{})
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		parsed, ok := cookieBaseURL(value)
+		if !ok {
+			continue
+		}
+		key := parsed.Scheme + "://" + parsed.Host
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, key)
+	}
+	return result
+}
+
+func cookieBaseURL(baseURL string) (*url.URL, bool) {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return nil, false
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, false
+	}
+	parsed.Path = "/"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed, true
+}
+
+func sameCookieHost(a *url.URL, b *url.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
 }
 
 func (c *Client) jarHasCookieName(baseURL string, name string) bool {

@@ -146,6 +146,7 @@ func TestHotProjectOrderSendsCTokenAndPToken(t *testing.T) {
 		switch r.URL.Path {
 		case "/mall-search-items/items_detail/info":
 			http.SetCookie(w, &http.Cookie{Name: "kfcTime", Value: "warm", Path: "/"})
+			http.SetCookie(w, &http.Cookie{Name: "riskSeed", Value: "detail", Path: "/"})
 			writeJSON(t, w, mallProjectPayloadForTest(1001701))
 		case "/api/ticket/order/prepare":
 			if r.Method != http.MethodPost {
@@ -155,6 +156,7 @@ func TestHotProjectOrderSendsCTokenAndPToken(t *testing.T) {
 				t.Fatalf("prepare project_id = %q, want 1001701", r.URL.Query().Get("project_id"))
 			}
 			requireCookieValue(t, r, "kfcTime", "warm")
+			requireCookieValue(t, r, "riskSeed", "detail")
 			if err := json.NewDecoder(r.Body).Decode(&prepareBody); err != nil {
 				t.Fatalf("decode prepare body: %v", err)
 			}
@@ -173,6 +175,7 @@ func TestHotProjectOrderSendsCTokenAndPToken(t *testing.T) {
 				t.Fatalf("create query ptoken = %q, want preparedptoken", r.URL.Query().Get("ptoken"))
 			}
 			requireCookieValue(t, r, "kfcTime", "warm")
+			requireCookieValue(t, r, "riskSeed", "detail")
 			if err := json.NewDecoder(r.Body).Decode(&createBody); err != nil {
 				t.Fatalf("decode create body: %v", err)
 			}
@@ -309,6 +312,69 @@ func TestHotProjectCreateOrderKeepsEmptyPTokenFields(t *testing.T) {
 	}
 	if _, ok := createBody["clickPosition"]; ok {
 		t.Fatalf("clickPosition should not be sent: %#v", createBody["clickPosition"])
+	}
+}
+
+func TestHotProjectMirrorsProjectDetailCookiesToShowBase(t *testing.T) {
+	mallServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/mall-search-items/items_detail/info" {
+			t.Fatalf("unexpected mall request path: %s", r.URL.Path)
+		}
+		http.SetCookie(w, &http.Cookie{Name: "kfcTime", Value: "warm", Path: "/"})
+		http.SetCookie(w, &http.Cookie{Name: "riskSeed", Value: "detail", Path: "/"})
+		writeJSON(t, w, mallProjectPayloadForTest(1001701))
+	}))
+	defer mallServer.Close()
+
+	showServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/ticket/order/prepare" {
+			t.Fatalf("unexpected show request path: %s", r.URL.Path)
+		}
+		requireCookieValue(t, r, "SESSDATA", "test")
+		requireCookieValue(t, r, "kfcTime", "warm")
+		requireCookieValue(t, r, "riskSeed", "detail")
+		writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token"}})
+	}))
+	defer showServer.Close()
+
+	client := NewClient(nil)
+	client.mallBaseURL = mallServer.URL
+	client.showBaseURL = showServer.URL
+	task := model.Task{
+		ProjectID:    1001701,
+		ScreenID:     2001,
+		SKUID:        3001,
+		Quantity:     1,
+		OrderType:    1,
+		PayMoney:     68000,
+		IsHotProject: true,
+	}
+	if _, err := client.PrepareOrder(context.Background(), task, "SESSDATA=test"); err != nil {
+		t.Fatalf("PrepareOrder: %v", err)
+	}
+}
+
+func TestWithShowBaseURLMirrorsAllCookiesToNewBase(t *testing.T) {
+	client := NewClient(nil)
+	firstBase := "https://first.example.test"
+	secondBase := "https://second.example.test"
+	firstURL, _ := cookieBaseURL(firstBase)
+	client.showBaseURL = firstBase
+	client.httpClient.Jar.SetCookies(firstURL, []*http.Cookie{
+		{Name: "kfcTime", Value: "warm", Path: "/"},
+		{Name: "riskSeed", Value: "first", Path: "/"},
+	})
+
+	switched := client.WithShowBaseURL(secondBase)
+	secondURL, _ := cookieBaseURL(secondBase)
+	cookies := switched.httpClient.Jar.Cookies(secondURL)
+	if value := cookieValue(cookies, "kfcTime"); value != "warm" {
+		t.Fatalf("mirrored kfcTime = %q, want warm; cookies=%#v", value, cookies)
+	}
+	if value := cookieValue(cookies, "riskSeed"); value != "first" {
+		t.Fatalf("mirrored riskSeed = %q, want first; cookies=%#v", value, cookies)
 	}
 }
 
@@ -641,6 +707,15 @@ func requireCookieValue(t *testing.T, r *http.Request, name string, want string)
 	if cookie.Value != want {
 		t.Fatalf("cookie %s = %q, want %q", name, cookie.Value, want)
 	}
+}
+
+func cookieValue(cookies []*http.Cookie, name string) string {
+	for _, cookie := range cookies {
+		if cookie.Name == name {
+			return cookie.Value
+		}
+	}
+	return ""
 }
 
 func mallProjectPayloadForTest(projectID int64) map[string]any {

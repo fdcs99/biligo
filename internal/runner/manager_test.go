@@ -1116,6 +1116,7 @@ func TestRunnerSuperModeSwitchesBaseURLOnCreateRiskCode(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/ticket/order/prepare":
 			firstPrepareCalls.Add(1)
+			http.SetCookie(w, &http.Cookie{Name: "riskSeed", Value: "first", Path: "/"})
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token-first"}})
 		case "/api/ticket/order/createV2":
 			firstCreateCalls.Add(1)
@@ -1130,6 +1131,10 @@ func TestRunnerSuperModeSwitchesBaseURLOnCreateRiskCode(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/ticket/order/prepare":
 			secondPrepareCalls.Add(1)
+			cookie, err := r.Cookie("riskSeed")
+			if err != nil || cookie.Value != "first" {
+				t.Fatalf("second prepare riskSeed cookie = %#v, err=%v", cookie, err)
+			}
 			writeRunnerJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"token": "prepared-token-second"}})
 		case "/api/ticket/order/createV2":
 			secondCreateCalls.Add(1)
