@@ -1102,7 +1102,7 @@ function editTask(task: Task) {
     ticketLevel: task.ticketLevel,
     ticketDisplay: task.ticketDisplay,
     ticketPrice: task.ticketPrice,
-    saleStart: task.saleStart,
+    saleStart: normalizeSaleStartInput(task.saleStart),
     saleStatus: task.saleStatus,
     linkId: task.linkId,
     isHotProject: task.isHotProject,
@@ -1134,6 +1134,9 @@ async function saveTask() {
     if (hasRestockTaskSection.value) {
       applySelectedRestockTickets()
     }
+    if (hasRushTaskSection.value) {
+      taskForm.saleStart = normalizeSaleStartInput(taskForm.saleStart)
+    }
     if (hasRushTaskSection.value && (!taskForm.ticketDisplay || taskForm.skuId <= 0)) {
       throw new Error('请先获取票务信息并选择票信息')
     }
@@ -1142,6 +1145,9 @@ async function saveTask() {
     }
     if (hasRushTaskSection.value && !taskForm.saleStart.trim()) {
       throw new Error('抢票模式需要票档起售时间')
+    }
+    if (hasRushTaskSection.value && !parseTaskTime(taskForm.saleStart)) {
+      throw new Error('抢票模式需要设置合法起售时间')
     }
     if (isHybridTaskForm.value && taskForm.rushDurationSeconds <= 0) {
       throw new Error('抢票+回流捡漏模式需要设置大于 0 的抢票持续秒数')
@@ -1427,7 +1433,7 @@ function selectTicketOption(forceNameUpdate = false) {
     ticketLevel: ticket.ticketLevel,
     ticketDisplay: ticket.display,
     ticketPrice: ticket.price,
-    saleStart: ticket.saleStart,
+    saleStart: normalizeSaleStartInput(ticket.saleStart),
     saleStatus: ticket.saleStatus,
     linkId: ticket.linkId ?? 0,
     isHotProject: ticket.isHotProject,
@@ -1473,7 +1479,7 @@ function applySelectedRestockTickets(forceNameUpdate = false) {
     ticketLevel: primary.ticketLevel,
     ticketDisplay: primary.display,
     ticketPrice: primary.price,
-    saleStart: primary.saleStart,
+    saleStart: normalizeSaleStartInput(primary.saleStart),
     saleStatus: primary.saleStatus,
     linkId: primary.linkId ?? 0,
     isHotProject: primary.isHotProject,
@@ -1502,6 +1508,14 @@ function defaultEndAtFromSaleStart(saleStart: string) {
   return formatDateTimeInput(new Date(parsed.getTime() + 10 * 60 * 1000))
 }
 
+function normalizeSaleStartInput(saleStart: string) {
+  const parsed = parseTaskTime(saleStart)
+  if (!parsed) {
+    return saleStart.trim()
+  }
+  return formatDateTimeSecondInput(parsed)
+}
+
 function formatDateTimeInput(date: Date) {
   const pad = (value: number) => String(value).padStart(2, '0')
   const chinaDate = new Date(date.getTime() + chinaTimeZoneOffsetMillis)
@@ -1510,6 +1524,20 @@ function formatDateTimeInput(date: Date) {
     pad(chinaDate.getUTCMonth() + 1),
     pad(chinaDate.getUTCDate()),
   ].join('-') + `T${pad(chinaDate.getUTCHours())}:${pad(chinaDate.getUTCMinutes())}`
+}
+
+function formatDateTimeSecondInput(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const chinaDate = new Date(date.getTime() + chinaTimeZoneOffsetMillis)
+  return [
+    chinaDate.getUTCFullYear(),
+    pad(chinaDate.getUTCMonth() + 1),
+    pad(chinaDate.getUTCDate()),
+  ].join('-') + ` ${pad(chinaDate.getUTCHours())}:${pad(chinaDate.getUTCMinutes())}:${pad(chinaDate.getUTCSeconds())}`
+}
+
+function handleSaleStartChange() {
+  taskForm.saleStart = normalizeSaleStartInput(taskForm.saleStart)
 }
 
 function buyerLabel(buyer: TicketBuyer) {
@@ -2814,7 +2842,15 @@ onUnmounted(() => {
               </el-col>
               <el-col :xs="24" :sm="12">
                 <el-form-item required label="起售时间">
-                  <el-input :model-value="taskForm.saleStart" disabled />
+                  <el-date-picker
+                    v-model="taskForm.saleStart"
+                    type="datetime"
+                    value-format="YYYY-MM-DD HH:mm:ss"
+                    format="YYYY-MM-DD HH:mm:ss"
+                    placeholder="选择起售时间"
+                    class="full-input"
+                    @change="handleSaleStartChange"
+                  />
                 </el-form-item>
               </el-col>
             </el-row>
@@ -3045,7 +3081,15 @@ onUnmounted(() => {
             </el-col>
             <el-col v-if="taskForm.taskMode === 'rush'" :xs="24" :sm="12">
               <el-form-item required label="起售时间">
-                <el-input :model-value="taskForm.saleStart" disabled />
+                <el-date-picker
+                  v-model="taskForm.saleStart"
+                  type="datetime"
+                  value-format="YYYY-MM-DD HH:mm:ss"
+                  format="YYYY-MM-DD HH:mm:ss"
+                  placeholder="选择起售时间"
+                  class="full-input"
+                  @change="handleSaleStartChange"
+                />
               </el-form-item>
             </el-col>
           </el-row>

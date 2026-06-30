@@ -67,6 +67,27 @@ func TestValidateTaskRequiresPurchaseConfig(t *testing.T) {
 	}
 }
 
+func TestValidateTaskRequiresValidSaleStart(t *testing.T) {
+	task := model.Task{
+		AccountID:   1,
+		ProjectID:   1001701,
+		ScreenID:    2001,
+		SKUID:       3001,
+		SaleStart:   "not-a-time",
+		BuyerInfo:   []model.TicketBuyer{{Name: "张三", PersonalID: "110101199001010000"}},
+		Buyer:       "张三",
+		Tel:         "13800000000",
+		DeliverInfo: &model.TicketAddress{ID: 9, Name: "张三", Phone: "13800000000"},
+	}
+	if err := validateTask(task); err == nil {
+		t.Fatal("validateTask returned nil for invalid sale start")
+	}
+	task.SaleStart = "2026-06-13T20:00"
+	if err := validateTask(task); err != nil {
+		t.Fatalf("validateTask returned error for editable sale start format: %v", err)
+	}
+}
+
 func TestValidateConcurrentProxyRequiresProxyGroup(t *testing.T) {
 	task := model.Task{
 		AccountID:   1,

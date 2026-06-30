@@ -1677,6 +1677,11 @@ func validateTask(task model.Task) error {
 	if hasRushStage && strings.TrimSpace(task.SaleStart) == "" {
 		return errors.New("票档缺少起售时间")
 	}
+	if hasRushStage {
+		if _, err := parseTaskTime(task.SaleStart); err != nil {
+			return errors.New("抢票模式需要设置合法起售时间")
+		}
+	}
 	if taskMode == model.TaskModeHybrid && task.RushDurationSeconds <= 0 {
 		return errors.New("抢票+回流捡漏模式需要设置大于 0 的抢票持续秒数")
 	}
