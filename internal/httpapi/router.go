@@ -18,6 +18,8 @@ import (
 	"github.com/fdcs99/biligo/internal/applog"
 	"github.com/fdcs99/biligo/internal/biliauth"
 	"github.com/fdcs99/biligo/internal/biliticket"
+	"github.com/fdcs99/biligo/internal/bws"
+	"github.com/fdcs99/biligo/internal/bwsrunner"
 	"github.com/fdcs99/biligo/internal/events"
 	"github.com/fdcs99/biligo/internal/model"
 	"github.com/fdcs99/biligo/internal/notify"
@@ -29,14 +31,16 @@ import (
 )
 
 type Handler struct {
-	store  *store.Store
-	auth   *biliauth.Client
-	ticket *biliticket.Client
-	hub    *events.Hub
-	runner *runner.Manager
-	panel  *panelauth.Manager
-	logger *applog.Logger
-	notify notify.Sender
+	store     *store.Store
+	auth      *biliauth.Client
+	ticket    *biliticket.Client
+	bws       *bws.Client
+	hub       *events.Hub
+	runner    *runner.Manager
+	bwsRunner *bwsrunner.Manager
+	panel     *panelauth.Manager
+	logger    *applog.Logger
+	notify    notify.Sender
 }
 
 type RouterOptions struct {
@@ -45,8 +49,9 @@ type RouterOptions struct {
 }
 
 type Runtime struct {
-	Router *gin.Engine
-	Runner *runner.Manager
+	Router    *gin.Engine
+	Runner    *runner.Manager
+	BWSRunner *bwsrunner.Manager
 }
 
 const maxAccountImportJSONBytes = 2 * 1024 * 1024
@@ -88,21 +93,25 @@ func NewRuntime(store *store.Store, panel *panelauth.Manager, logger *applog.Log
 
 	hub := events.NewHub(logger)
 	ticket := biliticket.NewClient(nil)
+	bwsClient := bws.NewClient(nil)
 	notificationSender := options.NotificationSender
 	if notificationSender == nil {
 		notificationSender = notify.NewHTTPSender(nil)
 	}
 	runnerManager := runner.NewManager(store, ticket, hub)
 	runnerManager.SetNotifier(notify.NewService(store, notificationSender, hub))
+	bwsRunnerManager := bwsrunner.NewManager(store, bwsClient, hub)
 	handler := &Handler{
-		store:  store,
-		auth:   biliauth.NewClient(nil),
-		ticket: ticket,
-		hub:    hub,
-		runner: runnerManager,
-		panel:  panel,
-		logger: logger,
-		notify: notificationSender,
+		store:     store,
+		auth:      biliauth.NewClient(nil),
+		ticket:    ticket,
+		bws:       bwsClient,
+		hub:       hub,
+		runner:    runnerManager,
+		bwsRunner: bwsRunnerManager,
+		panel:     panel,
+		logger:    logger,
+		notify:    notificationSender,
 	}
 	api := router.Group("/api")
 	{
@@ -142,6 +151,17 @@ func NewRuntime(store *store.Store, panel *panelauth.Manager, logger *applog.Log
 			protected.POST("/tasks/:id/pause", handler.pauseTask)
 			protected.GET("/tasks/:id/logs", handler.listTaskLogs)
 
+			protected.POST("/bws/info", handler.fetchBWSInfo)
+			protected.GET("/bws/my-reservations", handler.fetchBWSMyReservations)
+			protected.GET("/bws/tasks", handler.listBWSTasks)
+			protected.POST("/bws/tasks", handler.createBWSTask)
+			protected.PUT("/bws/tasks/:id", handler.updateBWSTask)
+			protected.DELETE("/bws/tasks/:id", handler.deleteBWSTask)
+			protected.POST("/bws/tasks/:id/dispatch", handler.dispatchBWSTask)
+			protected.POST("/bws/tasks/:id/pause", handler.pauseBWSTask)
+			protected.GET("/bws/tasks/:id/logs", handler.listBWSTaskLogs)
+			protected.GET("/bws/logs", handler.listBWSLogs)
+
 			protected.GET("/notifications", handler.listNotifications)
 			protected.POST("/notifications", handler.createNotification)
 			protected.PUT("/notifications/:id", handler.updateNotification)
@@ -170,8 +190,9 @@ func NewRuntime(store *store.Store, panel *panelauth.Manager, logger *applog.Log
 	}
 
 	return Runtime{
-		Router: router,
-		Runner: runnerManager,
+		Router:    router,
+		Runner:    runnerManager,
+		BWSRunner: bwsRunnerManager,
 	}
 }
 
@@ -339,8 +360,10 @@ func (h *Handler) events(c *gin.Context) {
 
 	tasks, taskErr := h.store.ListTasks(c.Request.Context())
 	logs, logErr := h.store.ListTaskLogs(c.Request.Context(), 0)
-	if taskErr == nil && logErr == nil {
-		writeSSE(c, "snapshot", model.EventSnapshot{Tasks: tasks, Logs: logs})
+	bwsTasks, bwsTaskErr := h.store.ListBWSTasks(c.Request.Context())
+	bwsLogs, bwsLogErr := h.store.ListBWSTaskLogs(c.Request.Context(), 0)
+	if taskErr == nil && logErr == nil && bwsTaskErr == nil && bwsLogErr == nil {
+		writeSSE(c, "snapshot", model.EventSnapshot{Tasks: tasks, Logs: logs, BWSTasks: bwsTasks, BWSTaskLogs: bwsLogs})
 	}
 
 	ticker := time.NewTicker(15 * time.Second)
@@ -1171,6 +1194,208 @@ func (h *Handler) listTaskLogs(c *gin.Context) {
 		return
 	}
 	logs, err := h.store.ListTaskLogs(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, logs)
+}
+
+func (h *Handler) fetchBWSInfo(c *gin.Context) {
+	var input model.BWSInfoInput
+	if !bindJSON(c, &input) {
+		return
+	}
+	if input.AccountID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请选择账号"})
+		return
+	}
+	_, cookie, err := h.store.GetAccountCookie(c.Request.Context(), input.AccountID)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	info, err := h.bws.FetchInfo(c.Request.Context(), cookie, input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, info)
+}
+
+func (h *Handler) fetchBWSMyReservations(c *gin.Context) {
+	accountID, err := strconv.ParseInt(strings.TrimSpace(c.Query("accountId")), 10, 64)
+	if err != nil || accountID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "accountId 必须是有效账号 ID"})
+		return
+	}
+	year := strings.TrimSpace(c.Query("year"))
+	_, cookie, err := h.store.GetAccountCookie(c.Request.Context(), accountID)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	result, err := h.bws.FetchMyReservations(c.Request.Context(), cookie, year)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) listBWSTasks(c *gin.Context) {
+	tasks, err := h.store.ListBWSTasks(c.Request.Context())
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, tasks)
+}
+
+func (h *Handler) createBWSTask(c *gin.Context) {
+	var input model.BWSTaskInput
+	if !bindJSON(c, &input) || !requireName(c, input.Name, "BWS 任务名称不能为空") || !validateBWSTaskInput(c, input) {
+		return
+	}
+	task, err := h.store.CreateBWSTask(c.Request.Context(), input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	h.hub.Publish("bws.task.updated", task)
+	c.JSON(http.StatusCreated, task)
+}
+
+func (h *Handler) updateBWSTask(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var input model.BWSTaskInput
+	if !bindJSON(c, &input) || !requireName(c, input.Name, "BWS 任务名称不能为空") || !validateBWSTaskInput(c, input) {
+		return
+	}
+	task, err := h.store.UpdateBWSTask(c.Request.Context(), id, input)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	h.hub.Publish("bws.task.updated", task)
+	c.JSON(http.StatusOK, task)
+}
+
+func validateBWSTaskInput(c *gin.Context, input model.BWSTaskInput) bool {
+	if input.AccountID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "BWS 预约任务需要选择账号"})
+		return false
+	}
+	if strings.TrimSpace(input.Year) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "BWS 预约任务需要年份"})
+		return false
+	}
+	if strings.TrimSpace(input.TicketNo) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "BWS 预约任务需要票号"})
+		return false
+	}
+	if input.ReserveID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "BWS 预约任务需要预约 ID"})
+		return false
+	}
+	if strings.TrimSpace(input.Title) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "BWS 预约任务需要标题"})
+		return false
+	}
+	if model.NormalizeBWSTaskMode(input.Mode) == model.BWSTaskModeScheduled && input.ReserveBeginTime <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "BWS 预约任务需要预约开始时间"})
+		return false
+	}
+	if input.PollIntervalMillis <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "BWS 循环间隔必须大于 0"})
+		return false
+	}
+	if model.NormalizeProxyMode(input.ProxyMode) == model.ProxyModeConcurrent && input.ProxyGroupID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "BWS 并发代理需要选择代理组"})
+		return false
+	}
+	return true
+}
+
+func (h *Handler) deleteBWSTask(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	task, err := h.store.GetBWSTask(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	h.bwsRunner.Cancel(id)
+	if err := h.store.DeleteBWSTask(c.Request.Context(), id); err != nil {
+		respondError(c, err)
+		return
+	}
+	logMessage := "BWS 预约任务已删除。"
+	if name := strings.TrimSpace(task.Name); name != "" {
+		logMessage = fmt.Sprintf("BWS 预约任务已删除：%s。", name)
+	}
+	if log, err := h.store.AddBWSTaskLog(c.Request.Context(), id, "warn", logMessage); err == nil && log.ID > 0 {
+		h.hub.Publish("bws.log.created", log)
+	}
+	h.hub.Publish("bws.task.deleted", gin.H{"id": id})
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) dispatchBWSTask(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	task, err := h.bwsRunner.Dispatch(c.Request.Context(), id)
+	if err != nil {
+		respondTaskActionError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, task)
+}
+
+func (h *Handler) pauseBWSTask(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	task, err := h.bwsRunner.Pause(c.Request.Context(), id)
+	if err != nil {
+		respondTaskActionError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, task)
+}
+
+func (h *Handler) listBWSTaskLogs(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	logs, err := h.store.ListBWSTaskLogs(c.Request.Context(), id)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, logs)
+}
+
+func (h *Handler) listBWSLogs(c *gin.Context) {
+	var taskID int64
+	if raw := c.Query("task_id"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "task_id 必须是数字"})
+			return
+		}
+		taskID = parsed
+	}
+	logs, err := h.store.ListBWSTaskLogs(c.Request.Context(), taskID)
 	if err != nil {
 		respondError(c, err)
 		return

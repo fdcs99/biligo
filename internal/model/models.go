@@ -39,6 +39,12 @@ const (
 	DurationModeLimited   = "limited"
 	DurationModeUnlimited = "unlimited"
 
+	BWSReserveTypeActivity = "activity"
+	BWSReserveTypeGoods    = "goods"
+
+	BWSTaskModeScheduled = "scheduled"
+	BWSTaskModeImmediate = "immediate"
+
 	DefaultRushDurationSeconds = 600
 	DefaultProxyAPIPullTimes   = 1
 	MaxProxyAPIPullTimes       = 20
@@ -427,8 +433,132 @@ type TaskRuntimeUpdate struct {
 }
 
 type EventSnapshot struct {
-	Tasks []Task    `json:"tasks"`
-	Logs  []TaskLog `json:"logs"`
+	Tasks       []Task       `json:"tasks"`
+	Logs        []TaskLog    `json:"logs"`
+	BWSTasks    []BWSTask    `json:"bwsTasks,omitempty"`
+	BWSTaskLogs []BWSTaskLog `json:"bwsLogs,omitempty"`
+}
+
+type BWSInfoInput struct {
+	AccountID    int64  `json:"accountId"`
+	Year         string `json:"year"`
+	ReserveDates string `json:"reserveDates"`
+	ReserveType  string `json:"reserveType"`
+}
+
+type BWSReservationInfo struct {
+	Year         string         `json:"year"`
+	ReserveDates string         `json:"reserveDates"`
+	ReserveType  string         `json:"reserveType"`
+	Tickets      []BWSTicket    `json:"tickets"`
+	Items        []BWSItem      `json:"items"`
+	Raw          map[string]any `json:"raw,omitempty"`
+}
+
+type BWSTicket struct {
+	Date       string         `json:"date"`
+	TicketNo   string         `json:"ticketNo"`
+	ScreenName string         `json:"screenName"`
+	SKUName    string         `json:"skuName"`
+	IsVIP      bool           `json:"isVip"`
+	Raw        map[string]any `json:"raw,omitempty"`
+}
+
+type BWSItem struct {
+	ReserveID                 int64          `json:"reserveId"`
+	Title                     string         `json:"title"`
+	Date                      string         `json:"date"`
+	TicketNo                  string         `json:"ticketNo"`
+	ReserveBeginTime          int64          `json:"reserveBeginTime"`
+	NextReserveBeginTime      int64          `json:"nextReserveBeginTime"`
+	EffectiveReserveBeginTime int64          `json:"effectiveReserveBeginTime"`
+	ActBeginTime              int64          `json:"actBeginTime"`
+	ActEndTime                int64          `json:"actEndTime"`
+	ReserveLocation           string         `json:"reserveLocation"`
+	DescribeInfo              string         `json:"describeInfo"`
+	State                     int            `json:"state"`
+	IsVIPTicket               bool           `json:"isVipTicket"`
+	UserIsVIP                 bool           `json:"userIsVip"`
+	IsSecondPay               bool           `json:"isSecondPay"`
+	Reserved                  bool           `json:"reserved"`
+	Raw                       map[string]any `json:"raw,omitempty"`
+}
+
+type BWSMyReservationList struct {
+	Year  string             `json:"year"`
+	Items []BWSMyReservation `json:"items"`
+	Raw   map[string]any     `json:"raw,omitempty"`
+}
+
+type BWSMyReservation struct {
+	ReserveID       int64          `json:"reserveId"`
+	ReserveNo       string         `json:"reserveNo"`
+	Title           string         `json:"title"`
+	Date            string         `json:"date"`
+	ActBeginTime    int64          `json:"actBeginTime"`
+	ActEndTime      int64          `json:"actEndTime"`
+	ReserveLocation string         `json:"reserveLocation"`
+	DescribeInfo    string         `json:"describeInfo"`
+	Status          string         `json:"status"`
+	Raw             map[string]any `json:"raw,omitempty"`
+}
+
+type BWSTask struct {
+	ID                 int64  `json:"id"`
+	Name               string `json:"name"`
+	AccountID          int64  `json:"accountId"`
+	AccountName        string `json:"accountName"`
+	ProxyGroupID       int64  `json:"proxyGroupId"`
+	ProxyGroupName     string `json:"proxyGroupName"`
+	ProxyMode          string `json:"proxyMode"`
+	ReserveType        string `json:"reserveType"`
+	Year               string `json:"year"`
+	ReserveDate        string `json:"reserveDate"`
+	TicketNo           string `json:"ticketNo"`
+	ReserveID          int64  `json:"reserveId"`
+	Title              string `json:"title"`
+	ReserveBeginTime   int64  `json:"reserveBeginTime"`
+	Mode               string `json:"mode"`
+	TimeSyncStrategy   string `json:"timeSyncStrategy"`
+	TimeOffsetMillis   int64  `json:"timeOffsetMillis"`
+	TimeSyncedAt       string `json:"timeSyncedAt"`
+	PollIntervalMillis int    `json:"pollIntervalMillis"`
+	Status             string `json:"status"`
+	LastMessage        string `json:"lastMessage"`
+	LastCheckedAt      string `json:"lastCheckedAt"`
+	CreatedAt          string `json:"createdAt"`
+	UpdatedAt          string `json:"updatedAt"`
+}
+
+type BWSTaskInput struct {
+	Name               string `json:"name"`
+	AccountID          int64  `json:"accountId"`
+	ProxyGroupID       int64  `json:"proxyGroupId"`
+	ProxyMode          string `json:"proxyMode"`
+	ReserveType        string `json:"reserveType"`
+	Year               string `json:"year"`
+	ReserveDate        string `json:"reserveDate"`
+	TicketNo           string `json:"ticketNo"`
+	ReserveID          int64  `json:"reserveId"`
+	Title              string `json:"title"`
+	ReserveBeginTime   int64  `json:"reserveBeginTime"`
+	Mode               string `json:"mode"`
+	TimeSyncStrategy   string `json:"timeSyncStrategy"`
+	PollIntervalMillis int    `json:"pollIntervalMillis"`
+}
+
+type BWSTaskLog struct {
+	ID        int64  `json:"id"`
+	TaskID    int64  `json:"taskId"`
+	Level     string `json:"level"`
+	Message   string `json:"message"`
+	CreatedAt string `json:"createdAt"`
+}
+
+type BWSTaskRuntimeUpdate struct {
+	Status        string
+	LastMessage   string
+	LastCheckedAt string
 }
 
 func NormalizeTimeSyncStrategy(strategy string) string {
@@ -551,4 +681,29 @@ func NormalizeDurationMode(mode string) string {
 	default:
 		return DurationModeLimited
 	}
+}
+
+func NormalizeBWSReserveType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case BWSReserveTypeGoods:
+		return BWSReserveTypeGoods
+	default:
+		return BWSReserveTypeActivity
+	}
+}
+
+func NormalizeBWSTaskMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case BWSTaskModeImmediate:
+		return BWSTaskModeImmediate
+	default:
+		return BWSTaskModeScheduled
+	}
+}
+
+func BWSReserveTypeCode(value string) int {
+	if NormalizeBWSReserveType(value) == BWSReserveTypeGoods {
+		return 1
+	}
+	return 0
 }

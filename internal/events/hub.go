@@ -73,7 +73,7 @@ func (h *Hub) Publish(name string, payload any) {
 }
 
 func (h *Hub) logEvent(name string, payload any) {
-	if h.logger == nil || name != "log.created" {
+	if h.logger == nil || (name != "log.created" && name != "bws.log.created") {
 		return
 	}
 	switch value := payload.(type) {
@@ -82,6 +82,12 @@ func (h *Hub) logEvent(name string, payload any) {
 	case *model.TaskLog:
 		if value != nil {
 			h.logger.Log(value.Level, fmt.Sprintf("任务日志实时同步：任务 %d：%s", value.TaskID, value.Message))
+		}
+	case model.BWSTaskLog:
+		h.logger.Log(value.Level, fmt.Sprintf("BWS 任务日志实时同步：任务 %d：%s", value.TaskID, value.Message))
+	case *model.BWSTaskLog:
+		if value != nil {
+			h.logger.Log(value.Level, fmt.Sprintf("BWS 任务日志实时同步：任务 %d：%s", value.TaskID, value.Message))
 		}
 	}
 }

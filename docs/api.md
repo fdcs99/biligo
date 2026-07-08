@@ -459,6 +459,191 @@
 
 响应：`204 No Content`。
 
+## BWS 预约
+
+BWS 预约功能使用独立任务表和日志表，不复用会员购抢票 `tasks`。所有接口都只接收账号 ID，后端从账号表读取 Cookie；账号 Cookie 必须包含 `bili_jct`，用于请求中的 `csrf`。
+
+### POST `/api/bws/info`
+
+拉取 BWS 活动预约或商品购买资格列表。
+
+请求：
+
+```json
+{
+  "accountId": 1,
+  "year": "202601",
+  "reserveDates": "20260710,20260711,20260712",
+  "reserveType": "activity"
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `accountId` | number | 本地账号 ID |
+| `year` | string | BWS 年份，默认 `202601` |
+| `reserveDates` | string | 逗号分隔的预约日期 |
+| `reserveType` | string | `activity` 活动预约，`goods` 商品购买资格 |
+
+响应：
+
+```json
+{
+  "year": "202601",
+  "reserveDates": "20260710,20260711,20260712",
+  "reserveType": "activity",
+  "tickets": [
+    {
+      "date": "20260710",
+      "ticketNo": "BW2026xxxx",
+      "screenName": "BW2026 7月10日",
+      "skuName": "普通票",
+      "isVip": false
+    }
+  ],
+  "items": [
+    {
+      "reserveId": 12345,
+      "title": "签售活动",
+      "date": "20260710",
+      "ticketNo": "BW2026xxxx",
+      "reserveBeginTime": 1783670400,
+      "nextReserveBeginTime": 0,
+      "effectiveReserveBeginTime": 1783670400,
+      "actBeginTime": 1783681200,
+      "actEndTime": 1783684800,
+      "reserveLocation": "活动区",
+      "describeInfo": "活动说明",
+      "state": 1,
+      "isVipTicket": false,
+      "userIsVip": false,
+      "isSecondPay": false,
+      "reserved": false
+    }
+  ]
+}
+```
+
+说明：
+
+- `effectiveReserveBeginTime` 是实际用于准时预约的开始时间；VIP 优先条目会按用户当日票种是否 VIP 选择 VIP 或普通预约时间。
+- `ticketNo` 由活动日期映射到用户当日电子票号，创建 BWS 任务时会一并保存。
+
+### GET `/api/bws/my-reservations?accountId=1&year=202601`
+
+获取当前账号的 BWS 我的预约。
+
+响应：
+
+```json
+{
+  "year": "202601",
+  "items": [
+    {
+      "reserveId": 12345,
+      "reserveNo": "10001",
+      "title": "签售活动",
+      "date": "20260710",
+      "actBeginTime": 1783681200,
+      "actEndTime": 1783684800,
+      "reserveLocation": "活动区",
+      "describeInfo": "活动说明",
+      "status": "预约成功"
+    }
+  ]
+}
+```
+
+### GET `/api/bws/tasks`
+
+获取 BWS 预约任务列表。
+
+任务字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `reserveType` | string | `activity` 或 `goods` |
+| `year` | string | BWS 年份 |
+| `reserveDate` | string | 预约条目日期 |
+| `ticketNo` | string | 当日电子票号 |
+| `reserveId` | number | BWS 预约 ID |
+| `title` | string | 活动或商品标题 |
+| `reserveBeginTime` | number | 预约开始时间，Unix 秒 |
+| `mode` | string | `scheduled` 等待开票，`immediate` 立刻抢 |
+| `timeSyncStrategy` | string | `bilibili` 或 `local` |
+| `pollIntervalMillis` | number | 预约循环间隔，毫秒 |
+| `proxyGroupId` | number | 代理组 ID，`0` 表示不使用代理 |
+| `proxyGroupName` | string | 代理组名称，仅响应字段 |
+| `proxyMode` | string | `round_robin` 循环代理或 `concurrent` 并发代理 |
+| `status` | string | `draft`、`waiting_start`、`running`、`success`、`failed`、`paused` |
+
+### POST `/api/bws/tasks`
+
+创建 BWS 预约任务。
+
+请求：
+
+```json
+{
+  "name": "BWS 签售活动",
+  "accountId": 1,
+  "reserveType": "activity",
+  "year": "202601",
+  "reserveDate": "20260710",
+  "ticketNo": "BW2026xxxx",
+  "reserveId": 12345,
+  "title": "签售活动",
+  "reserveBeginTime": 1783670400,
+  "mode": "scheduled",
+  "timeSyncStrategy": "bilibili",
+  "pollIntervalMillis": 1000,
+  "proxyGroupId": 0,
+  "proxyMode": "round_robin"
+}
+```
+
+响应：`201 Created`，返回创建后的 BWS 任务。
+
+### PUT `/api/bws/tasks/{id}`
+
+更新 BWS 预约任务。请求体同创建接口。
+
+### DELETE `/api/bws/tasks/{id}`
+
+删除 BWS 预约任务；若任务正在运行，会先取消后台任务。
+
+响应：`204 No Content`。
+
+### POST `/api/bws/tasks/{id}/dispatch`
+
+启动 BWS 预约任务。
+
+运行规则：
+
+- `mode=scheduled` 时任务启动后进入 `waiting_start`，等待到 `reserveBeginTime` 后开始预约。
+- `mode=immediate` 时任务启动后立即开始预约，不等待 `reserveBeginTime`；该模式仍会按 `timeSyncStrategy` 生成请求 `ts`。
+- `timeSyncStrategy=bilibili` 时启动前会同步哔哩哔哩时间，并用同步偏移计算准点时间和请求 `ts`。
+- 未配置代理组时，到点后单线程直连调用预约接口，循环间隔由 `pollIntervalMillis` 控制。
+- 配置代理组后，代理只作用于任务执行阶段的 `/reserve/do`；活动列表 `/reserve/info` 和我的预约 `/myreserve` 仍直连。
+- `proxyMode=round_robin` 为循环代理：到点后使用当前代理请求 `/reserve/do`；网络错误或 BWS/HTTP `412` 会标记当前节点失败并切换下一个代理继续。
+- `proxyMode=concurrent` 为并发代理：到点后每个可用代理节点启动一个预约 worker；任一 worker 成功即取消其他 worker；`412` 只淘汰单个代理节点，`75574`、`76674`、`76651` 会停止整个任务。
+- BWS API 代理组复用 `pullBeforeMinutes` 和 `pullTimes`：等待开票模式以 `reserveBeginTime` 为目标时间提前拉取，立刻抢模式会在执行前立即拉取；成功合并节点后用于预约执行，手动列表和我的预约不使用代理。
+- `0` 视为预约成功；`75637`、`-702`、`429`、`76650` 继续重试；未启用代理时 `412` 与 `75574`、`76674`、`76651` 一样视为终止失败。
+
+### POST `/api/bws/tasks/{id}/pause`
+
+停止 BWS 预约任务。
+
+### GET `/api/bws/tasks/{id}/logs`
+
+获取指定 BWS 任务的最近 200 条日志。
+
+### GET `/api/bws/logs`
+
+获取全部 BWS 任务的最近 200 条日志。可选查询参数 `task_id` 用于按 BWS 任务过滤；任务管理页会与会员购任务日志合并展示。
+
 ## 票务信息获取
 
 票务信息获取使用新版会员购项目详情接口，并整理可选择的票信息。
@@ -834,7 +1019,7 @@
 
 ## 代理管理
 
-代理组用于抢票模式和抢票+回流模式的抢票阶段。当前支持普通代理组和快代理私密代理 API 组；任务可通过 `proxyMode` 选择循环代理或并发代理。
+代理组用于抢票模式、抢票+回流模式的抢票阶段，以及 BWS 任务的预约执行阶段。当前支持普通代理组和快代理私密代理 API 组；任务可通过 `proxyMode` 选择循环代理或并发代理。
 
 代理组对象：
 

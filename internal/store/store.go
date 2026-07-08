@@ -19,6 +19,7 @@ type Store struct {
 }
 
 const interruptedTaskMessage = "软件启动时检测到上次抢票未结束，已自动停止任务。"
+const interruptedBWSTaskMessage = "软件启动时检测到上次 BWS 预约未结束，已自动停止任务。"
 
 func Open(path string) (*Store, error) {
 	if path != ":memory:" {
@@ -174,6 +175,39 @@ func (s *Store) migrate(ctx context.Context) error {
 			message TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS bws_tasks (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				name TEXT NOT NULL,
+				account_id INTEGER NOT NULL DEFAULT 0,
+				proxy_group_id INTEGER NOT NULL DEFAULT 0,
+				proxy_mode TEXT NOT NULL DEFAULT 'round_robin',
+				reserve_type TEXT NOT NULL DEFAULT 'activity',
+				year TEXT NOT NULL DEFAULT '202601',
+			reserve_date TEXT NOT NULL DEFAULT '',
+			ticket_no TEXT NOT NULL DEFAULT '',
+			reserve_id INTEGER NOT NULL DEFAULT 0,
+			title TEXT NOT NULL DEFAULT '',
+			reserve_begin_time INTEGER NOT NULL DEFAULT 0,
+			mode TEXT NOT NULL DEFAULT 'scheduled',
+			time_sync_strategy TEXT NOT NULL DEFAULT 'bilibili',
+			time_offset_ms INTEGER NOT NULL DEFAULT 0,
+			time_synced_at TEXT NOT NULL DEFAULT '',
+			pre_start_offset_ms INTEGER NOT NULL DEFAULT 0,
+			poll_interval_ms INTEGER NOT NULL DEFAULT 50,
+			concurrency INTEGER NOT NULL DEFAULT 1,
+			status TEXT NOT NULL DEFAULT 'draft',
+			last_message TEXT NOT NULL DEFAULT '',
+			last_checked_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS bws_task_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL DEFAULT 0,
+			level TEXT NOT NULL,
+			message TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
 	}
 
 	for _, stmt := range statements {
@@ -197,6 +231,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "tasks", "restock_poll_interval_ms", "INTEGER NOT NULL DEFAULT 1000"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "bws_tasks", "proxy_group_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "bws_tasks", "proxy_mode", "TEXT NOT NULL DEFAULT 'round_robin'"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "proxy_nodes", "last_test_latency_ms", "INTEGER NOT NULL DEFAULT 0"); err != nil {
@@ -610,13 +650,14 @@ func (s *Store) ListProxyGroups(ctx context.Context) ([]model.ProxyGroup, error)
 			pg.last_test_status, pg.last_test_message, pg.last_tested_at,
 			COUNT(DISTINCT pn.id),
 			COUNT(DISTINCT CASE WHEN pn.last_test_status = 'success' THEN pn.id END),
-			COALESCE(MAX(CASE WHEN t.status IN ('waiting_start', 'running') THEN 1 ELSE 0 END), 0),
-			pg.created_at, pg.updated_at
-		FROM proxy_groups pg
-		LEFT JOIN proxy_nodes pn ON pn.group_id = pg.id
-		LEFT JOIN tasks t ON t.proxy_group_id = pg.id
-		GROUP BY pg.id
-		ORDER BY pg.updated_at DESC, pg.id DESC
+				COALESCE(MAX(CASE WHEN t.status IN ('waiting_start', 'running') OR bt.status IN ('waiting_start', 'running') THEN 1 ELSE 0 END), 0),
+				pg.created_at, pg.updated_at
+			FROM proxy_groups pg
+			LEFT JOIN proxy_nodes pn ON pn.group_id = pg.id
+			LEFT JOIN tasks t ON t.proxy_group_id = pg.id
+			LEFT JOIN bws_tasks bt ON bt.proxy_group_id = pg.id
+			GROUP BY pg.id
+			ORDER BY pg.updated_at DESC, pg.id DESC
 	`)
 	if err != nil {
 		return nil, err
@@ -643,13 +684,14 @@ func (s *Store) GetProxyGroup(ctx context.Context, id int64) (model.ProxyGroup, 
 			pg.last_test_status, pg.last_test_message, pg.last_tested_at,
 			COUNT(DISTINCT pn.id),
 			COUNT(DISTINCT CASE WHEN pn.last_test_status = 'success' THEN pn.id END),
-			COALESCE(MAX(CASE WHEN t.status IN ('waiting_start', 'running') THEN 1 ELSE 0 END), 0),
-			pg.created_at, pg.updated_at
-		FROM proxy_groups pg
-		LEFT JOIN proxy_nodes pn ON pn.group_id = pg.id
-		LEFT JOIN tasks t ON t.proxy_group_id = pg.id
-		WHERE pg.id = ?
-		GROUP BY pg.id
+				COALESCE(MAX(CASE WHEN t.status IN ('waiting_start', 'running') OR bt.status IN ('waiting_start', 'running') THEN 1 ELSE 0 END), 0),
+				pg.created_at, pg.updated_at
+			FROM proxy_groups pg
+			LEFT JOIN proxy_nodes pn ON pn.group_id = pg.id
+			LEFT JOIN tasks t ON t.proxy_group_id = pg.id
+			LEFT JOIN bws_tasks bt ON bt.proxy_group_id = pg.id
+			WHERE pg.id = ?
+			GROUP BY pg.id
 	`, id)
 	err := scanProxyGroup(row, &group)
 	return group, err
@@ -707,9 +749,12 @@ func (s *Store) ProxyGroupInUse(ctx context.Context, id int64) (bool, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
-		FROM tasks
-		WHERE proxy_group_id = ? AND status IN ('waiting_start', 'running')
-	`, id).Scan(&count)
+		FROM (
+			SELECT id FROM tasks WHERE proxy_group_id = ? AND status IN ('waiting_start', 'running')
+			UNION ALL
+			SELECT id FROM bws_tasks WHERE proxy_group_id = ? AND status IN ('waiting_start', 'running')
+		)
+	`, id, id).Scan(&count)
 	return count > 0, err
 }
 
@@ -1283,6 +1328,269 @@ func (s *Store) ListTaskLogs(ctx context.Context, taskID int64) ([]model.TaskLog
 	return logs, rows.Err()
 }
 
+func (s *Store) ListBWSTasks(ctx context.Context) ([]model.BWSTask, error) {
+	rows, err := s.db.QueryContext(ctx, `
+			SELECT
+				t.id, t.name, t.account_id, COALESCE(a.name, ''),
+				t.proxy_group_id, COALESCE(pg.name, ''), t.proxy_mode,
+				t.reserve_type, t.year, t.reserve_date,
+				t.ticket_no, t.reserve_id, t.title, t.reserve_begin_time,
+				t.mode, t.time_sync_strategy, t.time_offset_ms, t.time_synced_at,
+				t.poll_interval_ms, t.status, t.last_message, t.last_checked_at, t.created_at, t.updated_at
+			FROM bws_tasks t
+			LEFT JOIN accounts a ON a.id = t.account_id
+			LEFT JOIN proxy_groups pg ON pg.id = t.proxy_group_id
+			ORDER BY t.updated_at DESC, t.id DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tasks := make([]model.BWSTask, 0)
+	for rows.Next() {
+		var task model.BWSTask
+		if err := scanBWSTask(rows, &task); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+func (s *Store) CreateBWSTask(ctx context.Context, input model.BWSTaskInput) (model.BWSTask, error) {
+	now := nowText()
+	input = normalizeBWSTaskInput(input)
+	result, err := s.db.ExecContext(ctx, `
+				INSERT INTO bws_tasks (
+					name, account_id, proxy_group_id, proxy_mode, reserve_type, year, reserve_date, ticket_no, reserve_id, title,
+					reserve_begin_time, mode, time_sync_strategy, poll_interval_ms,
+					status, last_message, created_at, updated_at
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', 'BWS 预约任务已创建，等待启动。', ?, ?)
+			`, strings.TrimSpace(input.Name), input.AccountID, input.ProxyGroupID, input.ProxyMode, input.ReserveType, strings.TrimSpace(input.Year), strings.TrimSpace(input.ReserveDate), strings.TrimSpace(input.TicketNo), input.ReserveID, strings.TrimSpace(input.Title), input.ReserveBeginTime, input.Mode, input.TimeSyncStrategy, input.PollIntervalMillis, now, now)
+	if err != nil {
+		return model.BWSTask{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return model.BWSTask{}, err
+	}
+	if _, err := s.AddBWSTaskLog(ctx, id, "info", "BWS 预约任务已创建。"); err != nil {
+		return model.BWSTask{}, err
+	}
+	return s.GetBWSTask(ctx, id)
+}
+
+func (s *Store) GetBWSTask(ctx context.Context, id int64) (model.BWSTask, error) {
+	var task model.BWSTask
+	row := s.db.QueryRowContext(ctx, `
+			SELECT
+				t.id, t.name, t.account_id, COALESCE(a.name, ''),
+				t.proxy_group_id, COALESCE(pg.name, ''), t.proxy_mode,
+				t.reserve_type, t.year, t.reserve_date,
+				t.ticket_no, t.reserve_id, t.title, t.reserve_begin_time,
+				t.mode, t.time_sync_strategy, t.time_offset_ms, t.time_synced_at,
+				t.poll_interval_ms, t.status, t.last_message, t.last_checked_at, t.created_at, t.updated_at
+			FROM bws_tasks t
+			LEFT JOIN accounts a ON a.id = t.account_id
+			LEFT JOIN proxy_groups pg ON pg.id = t.proxy_group_id
+			WHERE t.id = ?
+	`, id)
+	err := scanBWSTask(row, &task)
+	return task, err
+}
+
+func (s *Store) UpdateBWSTask(ctx context.Context, id int64, input model.BWSTaskInput) (model.BWSTask, error) {
+	now := nowText()
+	input = normalizeBWSTaskInput(input)
+	_, err := s.db.ExecContext(ctx, `
+			UPDATE bws_tasks
+			SET name = ?, account_id = ?, proxy_group_id = ?, proxy_mode = ?, reserve_type = ?, year = ?, reserve_date = ?, ticket_no = ?,
+				reserve_id = ?, title = ?, reserve_begin_time = ?, mode = ?, time_sync_strategy = ?,
+				poll_interval_ms = ?, updated_at = ?
+			WHERE id = ?
+		`, strings.TrimSpace(input.Name), input.AccountID, input.ProxyGroupID, input.ProxyMode, input.ReserveType, strings.TrimSpace(input.Year), strings.TrimSpace(input.ReserveDate), strings.TrimSpace(input.TicketNo), input.ReserveID, strings.TrimSpace(input.Title), input.ReserveBeginTime, input.Mode, input.TimeSyncStrategy, input.PollIntervalMillis, now, id)
+	if err != nil {
+		return model.BWSTask{}, err
+	}
+	if _, err := s.AddBWSTaskLog(ctx, id, "info", "BWS 预约任务配置已更新。"); err != nil {
+		return model.BWSTask{}, err
+	}
+	return s.GetBWSTask(ctx, id)
+}
+
+func (s *Store) DeleteBWSTask(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM bws_tasks WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) PauseInterruptedBWSTasks(ctx context.Context) ([]model.BWSTask, error) {
+	tasks, _, err := s.PauseActiveBWSTasks(ctx, interruptedBWSTaskMessage)
+	return tasks, err
+}
+
+func (s *Store) PauseActiveBWSTasks(ctx context.Context, message string) ([]model.BWSTask, []model.BWSTaskLog, error) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "BWS 预约任务已停止。"
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id
+		FROM bws_tasks
+		WHERE status IN ('waiting_start', 'running')
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	tasks := make([]model.BWSTask, 0, len(ids))
+	logs := make([]model.BWSTaskLog, 0, len(ids))
+	for _, id := range ids {
+		task, log, err := s.SetBWSTaskRuntime(ctx, id, model.BWSTaskRuntimeUpdate{
+			Status:      "paused",
+			LastMessage: message,
+		}, "warn")
+		if err != nil {
+			return nil, nil, err
+		}
+		tasks = append(tasks, task)
+		logs = append(logs, log)
+	}
+	return tasks, logs, nil
+}
+
+func (s *Store) SetBWSTaskRuntime(ctx context.Context, id int64, update model.BWSTaskRuntimeUpdate, level string) (model.BWSTask, model.BWSTaskLog, error) {
+	now := nowText()
+	lastCheckedAt := strings.TrimSpace(update.LastCheckedAt)
+	if lastCheckedAt == "" {
+		lastCheckedAt = time.Now().Format(time.RFC3339Nano)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE bws_tasks
+		SET status = COALESCE(NULLIF(?, ''), status),
+			last_message = COALESCE(NULLIF(?, ''), last_message),
+			last_checked_at = ?,
+			updated_at = ?
+		WHERE id = ?
+	`, strings.TrimSpace(update.Status), strings.TrimSpace(update.LastMessage), lastCheckedAt, now, id)
+	if err != nil {
+		return model.BWSTask{}, model.BWSTaskLog{}, err
+	}
+	var log model.BWSTaskLog
+	if strings.TrimSpace(update.LastMessage) != "" {
+		if level == "" {
+			level = "info"
+		}
+		log, err = s.AddBWSTaskLog(ctx, id, level, update.LastMessage)
+		if err != nil {
+			return model.BWSTask{}, model.BWSTaskLog{}, err
+		}
+	}
+	task, err := s.GetBWSTask(ctx, id)
+	if err != nil {
+		return model.BWSTask{}, model.BWSTaskLog{}, err
+	}
+	return task, log, nil
+}
+
+func (s *Store) SetBWSTaskTimeSync(ctx context.Context, id int64, strategy string, offsetMillis int64, syncedAt string, message string) (model.BWSTask, model.BWSTaskLog, error) {
+	now := nowText()
+	strategy = model.NormalizeTimeSyncStrategy(strategy)
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE bws_tasks
+		SET time_sync_strategy = ?,
+			time_offset_ms = ?,
+			time_synced_at = ?,
+			last_message = COALESCE(NULLIF(?, ''), last_message),
+			updated_at = ?
+		WHERE id = ?
+	`, strategy, offsetMillis, strings.TrimSpace(syncedAt), strings.TrimSpace(message), now, id)
+	if err != nil {
+		return model.BWSTask{}, model.BWSTaskLog{}, err
+	}
+	var log model.BWSTaskLog
+	if strings.TrimSpace(message) != "" {
+		log, err = s.AddBWSTaskLog(ctx, id, "info", message)
+		if err != nil {
+			return model.BWSTask{}, model.BWSTaskLog{}, err
+		}
+	}
+	task, err := s.GetBWSTask(ctx, id)
+	if err != nil {
+		return model.BWSTask{}, model.BWSTaskLog{}, err
+	}
+	return task, log, nil
+}
+
+func (s *Store) AddBWSTaskLog(ctx context.Context, taskID int64, level string, message string) (model.BWSTaskLog, error) {
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO bws_task_logs (task_id, level, message, created_at)
+		VALUES (?, ?, ?, ?)
+	`, taskID, strings.TrimSpace(level), strings.TrimSpace(message), nowText())
+	if err != nil {
+		return model.BWSTaskLog{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return model.BWSTaskLog{}, err
+	}
+	return s.GetBWSTaskLog(ctx, id)
+}
+
+func (s *Store) GetBWSTaskLog(ctx context.Context, id int64) (model.BWSTaskLog, error) {
+	var log model.BWSTaskLog
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, task_id, level, message, created_at
+		FROM bws_task_logs
+		WHERE id = ?
+	`, id).Scan(&log.ID, &log.TaskID, &log.Level, &log.Message, &log.CreatedAt)
+	return log, err
+}
+
+func (s *Store) ListBWSTaskLogs(ctx context.Context, taskID int64) ([]model.BWSTaskLog, error) {
+	query := `
+		SELECT id, task_id, level, message, created_at
+		FROM bws_task_logs
+	`
+	args := []any{}
+	if taskID > 0 {
+		query += ` WHERE task_id = ?`
+		args = append(args, taskID)
+	}
+	query += ` ORDER BY id DESC LIMIT 200`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	logs := make([]model.BWSTaskLog, 0)
+	for rows.Next() {
+		var log model.BWSTaskLog
+		if err := rows.Scan(&log.ID, &log.TaskID, &log.Level, &log.Message, &log.CreatedAt); err != nil {
+			return nil, err
+		}
+		logs = append(logs, log)
+	}
+	return logs, rows.Err()
+}
+
 func (s *Store) ensureColumn(ctx context.Context, table string, column string, definition string) error {
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
@@ -1522,6 +1830,51 @@ func scanTask(scanner taskScanner, task *model.Task) error {
 	return nil
 }
 
+func scanBWSTask(scanner taskScanner, task *model.BWSTask) error {
+	if err := scanner.Scan(
+		&task.ID,
+		&task.Name,
+		&task.AccountID,
+		&task.AccountName,
+		&task.ProxyGroupID,
+		&task.ProxyGroupName,
+		&task.ProxyMode,
+		&task.ReserveType,
+		&task.Year,
+		&task.ReserveDate,
+		&task.TicketNo,
+		&task.ReserveID,
+		&task.Title,
+		&task.ReserveBeginTime,
+		&task.Mode,
+		&task.TimeSyncStrategy,
+		&task.TimeOffsetMillis,
+		&task.TimeSyncedAt,
+		&task.PollIntervalMillis,
+		&task.Status,
+		&task.LastMessage,
+		&task.LastCheckedAt,
+		&task.CreatedAt,
+		&task.UpdatedAt,
+	); err != nil {
+		return err
+	}
+	task.ReserveType = model.NormalizeBWSReserveType(task.ReserveType)
+	task.Mode = model.NormalizeBWSTaskMode(task.Mode)
+	task.TimeSyncStrategy = model.NormalizeTimeSyncStrategy(task.TimeSyncStrategy)
+	task.ProxyMode = model.NormalizeProxyMode(task.ProxyMode)
+	if task.ProxyGroupID <= 0 {
+		task.ProxyMode = model.ProxyModeRoundRobin
+	}
+	if strings.TrimSpace(task.Year) == "" {
+		task.Year = "202601"
+	}
+	if task.PollIntervalMillis <= 0 {
+		task.PollIntervalMillis = 1000
+	}
+	return nil
+}
+
 func boolToInt(value bool) int {
 	if value {
 		return 1
@@ -1565,6 +1918,28 @@ func normalizeTaskInput(input model.TaskInput) model.TaskInput {
 	}
 	if input.RestockPollIntervalMillis <= 0 {
 		input.RestockPollIntervalMillis = input.PollIntervalMillis
+	}
+	return input
+}
+
+func normalizeBWSTaskInput(input model.BWSTaskInput) model.BWSTaskInput {
+	input.ReserveType = model.NormalizeBWSReserveType(input.ReserveType)
+	input.Mode = model.NormalizeBWSTaskMode(input.Mode)
+	input.TimeSyncStrategy = model.NormalizeTimeSyncStrategy(input.TimeSyncStrategy)
+	input.ProxyMode = model.NormalizeProxyMode(input.ProxyMode)
+	if input.ProxyGroupID <= 0 {
+		input.ProxyGroupID = 0
+		input.ProxyMode = model.ProxyModeRoundRobin
+	}
+	input.Year = strings.TrimSpace(input.Year)
+	if input.Year == "" {
+		input.Year = "202601"
+	}
+	input.ReserveDate = strings.TrimSpace(input.ReserveDate)
+	input.TicketNo = strings.TrimSpace(input.TicketNo)
+	input.Title = strings.TrimSpace(input.Title)
+	if input.PollIntervalMillis <= 0 {
+		input.PollIntervalMillis = 1000
 	}
 	return input
 }

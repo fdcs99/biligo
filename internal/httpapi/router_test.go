@@ -207,6 +207,102 @@ func TestTaskAPIsRejectConcurrentProxyWithoutGroup(t *testing.T) {
 	}
 }
 
+func TestBWSTaskAPIsRejectConcurrentProxyWithoutGroup(t *testing.T) {
+	taskStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer taskStore.Close()
+
+	router := newTestRouter(taskStore)
+	token := loginTestPanel(t, router, "panel-secret")
+	body := bytes.NewBufferString(`{"name":"BWS并发代理任务","accountId":1,"proxyMode":"concurrent","reserveType":"activity","year":"202601","reserveDate":"20260710","ticketNo":"TICKET-10","reserveId":12345,"title":"BWS活动","reserveBeginTime":1783670000,"timeSyncStrategy":"local","pollIntervalMillis":1000}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/bws/tasks", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), "BWS 并发代理需要选择代理组") {
+		t.Fatalf("create BWS concurrent proxy task status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestBWSTaskAPIsAllowImmediateWithoutReserveBeginTime(t *testing.T) {
+	taskStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer taskStore.Close()
+
+	router := newTestRouter(taskStore)
+	token := loginTestPanel(t, router, "panel-secret")
+	body := bytes.NewBufferString(`{"name":"BWS立即任务","accountId":1,"mode":"immediate","reserveType":"activity","year":"202601","reserveDate":"20260710","ticketNo":"TICKET-10","reserveId":12345,"title":"BWS活动","timeSyncStrategy":"local","pollIntervalMillis":1000}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/bws/tasks", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("create BWS immediate task status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	var task model.BWSTask
+	if err := json.Unmarshal(resp.Body.Bytes(), &task); err != nil {
+		t.Fatalf("decode task: %v", err)
+	}
+	if task.Mode != model.BWSTaskModeImmediate {
+		t.Fatalf("task mode = %q, want %q", task.Mode, model.BWSTaskModeImmediate)
+	}
+}
+
+func TestBWSLogsAPIListsAllLogs(t *testing.T) {
+	taskStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer taskStore.Close()
+
+	account, err := taskStore.CreateAccount(context.Background(), model.AccountInput{Name: "BWS账号", Cookie: "SESSDATA=x; bili_jct=csrf"})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	task, err := taskStore.CreateBWSTask(context.Background(), model.BWSTaskInput{
+		Name:               "BWS日志任务",
+		AccountID:          account.ID,
+		ReserveType:        model.BWSReserveTypeActivity,
+		Year:               "202601",
+		ReserveDate:        "20260710",
+		TicketNo:           "TICKET-10",
+		ReserveID:          12345,
+		Title:              "BWS活动",
+		ReserveBeginTime:   1783670000,
+		TimeSyncStrategy:   model.TimeSyncStrategyLocal,
+		PollIntervalMillis: 1000,
+	})
+	if err != nil {
+		t.Fatalf("CreateBWSTask: %v", err)
+	}
+	if _, err := taskStore.AddBWSTaskLog(context.Background(), task.ID, "info", "BWS 日志"); err != nil {
+		t.Fatalf("AddBWSTaskLog: %v", err)
+	}
+
+	router := newTestRouter(taskStore)
+	token := loginTestPanel(t, router, "panel-secret")
+	req := httptest.NewRequest(http.MethodGet, "/api/bws/logs", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("BWS logs status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	var logs []model.BWSTaskLog
+	if err := json.Unmarshal(resp.Body.Bytes(), &logs); err != nil {
+		t.Fatalf("decode logs: %v", err)
+	}
+	if len(logs) == 0 || logs[0].TaskID != task.ID || logs[0].Message != "BWS 日志" {
+		t.Fatalf("unexpected BWS logs: %#v", logs)
+	}
+}
+
 func TestPanelAuthProtectsEventsAndAllowsQueryToken(t *testing.T) {
 	taskStore, err := store.Open(":memory:")
 	if err != nil {

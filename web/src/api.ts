@@ -368,6 +368,124 @@ export interface TaskLog {
 export interface EventSnapshot {
   tasks: Task[]
   logs: TaskLog[]
+  bwsTasks?: BWSTask[]
+  bwsLogs?: BWSTaskLog[]
+}
+
+export interface BWSInfoInput {
+  accountId: number
+  year: string
+  reserveDates: string
+  reserveType: string
+}
+
+export interface BWSTicket {
+  date: string
+  ticketNo: string
+  screenName: string
+  skuName: string
+  isVip: boolean
+  raw?: Record<string, unknown>
+}
+
+export interface BWSItem {
+  reserveId: number
+  title: string
+  date: string
+  ticketNo: string
+  reserveBeginTime: number
+  nextReserveBeginTime: number
+  effectiveReserveBeginTime: number
+  actBeginTime: number
+  actEndTime: number
+  reserveLocation: string
+  describeInfo: string
+  state: number
+  isVipTicket: boolean
+  userIsVip: boolean
+  isSecondPay: boolean
+  reserved: boolean
+  raw?: Record<string, unknown>
+}
+
+export interface BWSReservationInfo {
+  year: string
+  reserveDates: string
+  reserveType: string
+  tickets: BWSTicket[]
+  items: BWSItem[]
+  raw?: Record<string, unknown>
+}
+
+export interface BWSMyReservation {
+  reserveId: number
+  reserveNo: string
+  title: string
+  date: string
+  actBeginTime: number
+  actEndTime: number
+  reserveLocation: string
+  describeInfo: string
+  status: string
+  raw?: Record<string, unknown>
+}
+
+export interface BWSMyReservationList {
+  year: string
+  items: BWSMyReservation[]
+  raw?: Record<string, unknown>
+}
+
+export interface BWSTask {
+  id: number
+  name: string
+  accountId: number
+  accountName: string
+  proxyGroupId: number
+  proxyGroupName: string
+  proxyMode: string
+  reserveType: string
+  year: string
+  reserveDate: string
+  ticketNo: string
+  reserveId: number
+  title: string
+  reserveBeginTime: number
+  mode: string
+  timeSyncStrategy: string
+  timeOffsetMillis: number
+  timeSyncedAt: string
+  pollIntervalMillis: number
+  status: string
+  lastMessage: string
+  lastCheckedAt: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface BWSTaskInput {
+  name: string
+  accountId: number
+  proxyGroupId: number
+  proxyMode: string
+  reserveType: string
+  year: string
+  reserveDate: string
+  ticketNo: string
+  reserveId: number
+  title: string
+  reserveBeginTime: number
+  mode: string
+  timeSyncStrategy: string
+  pollIntervalMillis: number
+}
+
+export interface BWSTaskLog {
+  id: number
+  taskId: number
+  level: string
+  message: string
+  createdAt: string
 }
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? ''
@@ -502,6 +620,21 @@ export const api = {
   deleteTask: (id: number) => request<void>(`/api/tasks/${id}`, { method: 'DELETE' }),
   dispatchTask: (id: number) => request<Task>(`/api/tasks/${id}/dispatch`, { method: 'POST' }),
   pauseTask: (id: number) => request<Task>(`/api/tasks/${id}/pause`, { method: 'POST' }),
+  fetchBWSInfo: (payload: BWSInfoInput) =>
+    request<BWSReservationInfo>('/api/bws/info', { method: 'POST', body: JSON.stringify(payload) }),
+  fetchBWSMyReservations: (accountId: number, year: string) =>
+    request<BWSMyReservationList>(`/api/bws/my-reservations?accountId=${accountId}&year=${encodeURIComponent(year)}`),
+  listBWSTasks: () => request<BWSTask[]>('/api/bws/tasks'),
+  createBWSTask: (payload: BWSTaskInput) =>
+    request<BWSTask>('/api/bws/tasks', { method: 'POST', body: JSON.stringify(payload) }),
+  updateBWSTask: (id: number, payload: BWSTaskInput) =>
+    request<BWSTask>(`/api/bws/tasks/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteBWSTask: (id: number) => request<void>(`/api/bws/tasks/${id}`, { method: 'DELETE' }),
+  dispatchBWSTask: (id: number) => request<BWSTask>(`/api/bws/tasks/${id}/dispatch`, { method: 'POST' }),
+  pauseBWSTask: (id: number) => request<BWSTask>(`/api/bws/tasks/${id}/pause`, { method: 'POST' }),
+  listBWSTaskLogs: (taskId: number) => request<BWSTaskLog[]>(`/api/bws/tasks/${taskId}/logs`),
+  listBWSLogs: (taskId?: number) =>
+    request<BWSTaskLog[]>(taskId ? `/api/bws/logs?task_id=${taskId}` : '/api/bws/logs'),
   listNotifications: () => request<Notification[]>('/api/notifications'),
   createNotification: (payload: NotificationInput) =>
     request<Notification>('/api/notifications', { method: 'POST', body: JSON.stringify(payload) }),

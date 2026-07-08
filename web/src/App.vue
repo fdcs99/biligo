@@ -28,6 +28,13 @@ import type {
   AccountExportItem,
   AccountInput,
   AccountImportInput,
+  BWSInfoInput,
+  BWSItem,
+  BWSMyReservation,
+  BWSReservationInfo,
+  BWSTask,
+  BWSTaskInput,
+  BWSTaskLog,
   EventSnapshot,
   Health,
   Notification,
@@ -57,10 +64,23 @@ import {
   setUnauthorizedHandler,
 } from './api'
 
-type SectionKey = 'accounts' | 'notifications' | 'proxies' | 'taskConfig' | 'taskStatus'
+type SectionKey = 'accounts' | 'notifications' | 'proxies' | 'taskConfig' | 'bws' | 'taskStatus'
 type AccountFormMode = 'direct' | 'json'
 type QRLoginStatus = 'idle' | 'generated' | 'waiting_scan' | 'waiting_confirm' | 'confirmed' | 'expired' | 'failed'
 type TicketProjectHistorySuggestion = TicketProjectHistory & { value: string }
+type ManagedTaskKind = 'ticket' | 'bws'
+type ManagedTaskRow =
+  | { key: string; kind: 'ticket'; id: number; task: Task; bwsTask?: never }
+  | { key: string; kind: 'bws'; id: number; task?: never; bwsTask: BWSTask }
+type ManagedLogRow = {
+  key: string
+  kind: ManagedTaskKind
+  id: number
+  taskId: number
+  level: string
+  message: string
+  createdAt: string
+}
 
 const defaultSuperModeBase = 'show'
 const superModeBaseOptions = [
@@ -74,7 +94,8 @@ const sections: Array<{ key: SectionKey; label: string }> = [
   { key: 'accounts', label: '哔哩哔哩账号管理' },
   { key: 'notifications', label: '通知管理' },
   { key: 'proxies', label: '代理设置' },
-  { key: 'taskConfig', label: '任务配置' },
+  { key: 'taskConfig', label: '抢票' },
+  { key: 'bws', label: 'BWS预约' },
   { key: 'taskStatus', label: '任务管理' },
 ]
 
@@ -99,12 +120,15 @@ const proxyNodes = ref<ProxyNode[]>([])
 const ticketProjectHistories = ref<TicketProjectHistory[]>([])
 const tasks = ref<Task[]>([])
 const logs = ref<TaskLog[]>([])
+const bwsTasks = ref<BWSTask[]>([])
+const bwsLogs = ref<BWSTaskLog[]>([])
 
 const editingAccountId = ref<number | null>(null)
 const editingNotificationId = ref<number | null>(null)
 const editingProxyGroupId = ref<number | null>(null)
 const editingProxyNodeId = ref<number | null>(null)
 const editingTaskId = ref<number | null>(null)
+const editingBWSTaskId = ref<number | null>(null)
 
 const accountForm = reactive<AccountInput>({
   name: '',
@@ -202,9 +226,42 @@ const taskForm = reactive<TaskInput>({
   restockPollIntervalMillis: 1000,
 })
 
+const bwsQueryForm = reactive<BWSInfoInput>({
+  accountId: 0,
+  year: '202601',
+  reserveDates: '20260710,20260711,20260712',
+  reserveType: 'activity',
+})
+
+const bwsTaskForm = reactive<BWSTaskInput>({
+  name: '',
+  accountId: 0,
+  proxyGroupId: 0,
+  proxyMode: 'round_robin',
+  reserveType: 'activity',
+  year: '202601',
+  reserveDate: '',
+  ticketNo: '',
+  reserveId: 0,
+  title: '',
+  reserveBeginTime: 0,
+  mode: 'scheduled',
+  timeSyncStrategy: 'bilibili',
+  pollIntervalMillis: 1000,
+})
+
+const bwsInfo = ref<BWSReservationInfo | null>(null)
+const bwsItems = ref<BWSItem[]>([])
+const bwsMyReservations = ref<BWSMyReservation[]>([])
+const selectedBWSItemId = ref<number | null>(null)
+const selectedBWSTaskId = ref<number | null>(null)
+const bwsHideEnded = ref(true)
+const bwsHideReserved = ref(true)
+
 const selectedTaskId = ref<number | null>(null)
 const selectedProxyGroupId = ref<number | null>(null)
 const mobileLogMode = ref<'empty' | 'task' | 'all'>('empty')
+const selectedLogKind = ref<ManagedTaskKind | null>(null)
 const ticketProjectInput = ref('')
 const fetchedTicketProject = ref<TicketProject | null>(null)
 const ticketOptions = ref<TicketOption[]>([])
@@ -220,10 +277,54 @@ let eventSource: EventSource | null = null
 let clockTimer: number | undefined
 let panelAuthExpiryTimer: number | undefined
 
-const selectedTask = computed(() => tasks.value.find((task) => task.id === selectedTaskId.value))
-const selectedTaskTicketSubtitle = computed(() =>
-  selectedTask.value ? taskTicketSummary(selectedTask.value) : '',
-)
+const managedTasks = computed<ManagedTaskRow[]>(() => {
+  const rows: ManagedTaskRow[] = [
+    ...tasks.value.map((task) => ({ key: managedTaskKey('ticket', task.id), kind: 'ticket' as const, id: task.id, task })),
+    ...bwsTasks.value.map((task) => ({ key: managedTaskKey('bws', task.id), kind: 'bws' as const, id: task.id, bwsTask: task })),
+  ]
+  return rows.sort((a, b) => compareDateText(managedTaskUpdatedAt(b), managedTaskUpdatedAt(a)))
+})
+const selectedManagedTask = computed(() => {
+  if (selectedLogKind.value === 'ticket' && selectedTaskId.value) {
+    return managedTasks.value.find((task) => task.kind === 'ticket' && task.id === selectedTaskId.value) ?? null
+  }
+  if (selectedLogKind.value === 'bws' && selectedBWSTaskId.value) {
+    return managedTasks.value.find((task) => task.kind === 'bws' && task.id === selectedBWSTaskId.value) ?? null
+  }
+  return null
+})
+const selectedLogSubtitle = computed(() => {
+  const row = selectedManagedTask.value
+  if (!row) {
+    return ''
+  }
+  return row.kind === 'ticket' ? taskTicketSummary(row.task) : bwsManagedSummary(row.bwsTask)
+})
+const managedLogs = computed<ManagedLogRow[]>(() => {
+  const ticketRows = selectedLogKind.value === 'bws'
+    ? []
+    : logs.value.map((log) => ({
+        key: `ticket-${log.id}`,
+        kind: 'ticket' as const,
+        id: log.id,
+        taskId: log.taskId,
+        level: log.level,
+        message: log.message,
+        createdAt: log.createdAt,
+      }))
+  const bwsRows = selectedLogKind.value === 'ticket'
+    ? []
+    : bwsLogs.value.map((log) => ({
+        key: `bws-${log.id}`,
+        kind: 'bws' as const,
+        id: log.id,
+        taskId: log.taskId,
+        level: log.level,
+        message: log.message,
+        createdAt: log.createdAt,
+      }))
+  return [...ticketRows, ...bwsRows].sort((a, b) => compareDateText(b.createdAt, a.createdAt)).slice(0, 200)
+})
 const selectedAccountExportCount = computed(() => selectedAccountExportIds.value.length)
 const pendingTasks = computed(() => tasks.value.filter((task) => task.status === 'draft' || task.status === 'paused'))
 const issuedTasks = computed(() => tasks.value.filter((task) => task.status !== 'draft' && task.status !== 'paused'))
@@ -279,6 +380,29 @@ const canSaveProxyNode = computed(
     proxyNodeForm.port > 0 &&
     proxyNodeForm.port <= 65535,
 )
+const filteredBWSItems = computed(() =>
+  bwsItems.value.filter((item) => {
+    if (bwsHideEnded.value && item.state === 3) {
+      return false
+    }
+    if (bwsHideReserved.value && item.reserved) {
+      return false
+    }
+    return true
+  }),
+)
+const canSaveBWSTask = computed(
+  () =>
+    bwsTaskForm.name.trim() !== '' &&
+    bwsTaskForm.accountId > 0 &&
+    bwsTaskForm.year.trim() !== '' &&
+    bwsTaskForm.ticketNo.trim() !== '' &&
+    bwsTaskForm.reserveId > 0 &&
+    bwsTaskForm.title.trim() !== '' &&
+    (bwsTaskForm.mode === 'immediate' || bwsTaskForm.reserveBeginTime > 0) &&
+    bwsTaskForm.pollIntervalMillis > 0 &&
+    (bwsTaskForm.proxyMode !== 'concurrent' || Number(bwsTaskForm.proxyGroupId || 0) > 0),
+)
 
 async function run(action: () => Promise<void>, success?: string) {
   loading.value = true
@@ -300,7 +424,7 @@ async function loadAll() {
   await run(async () => {
     health.value = await api.health()
 
-    const [sessionData, accountData, notificationData, proxyGroupData, historyData, taskData, logData] = await Promise.all([
+    const [sessionData, accountData, notificationData, proxyGroupData, historyData, taskData, logData, bwsTaskData, bwsLogData] = await Promise.all([
       api.session(),
       api.listAccounts(),
       api.listNotifications(),
@@ -308,6 +432,8 @@ async function loadAll() {
       api.listTicketProjectHistory(),
       api.listTasks(),
       api.listLogs(),
+      api.listBWSTasks(),
+      api.listBWSLogs(),
     ])
     session.value = sessionData
     accounts.value = accountData ?? []
@@ -317,6 +443,11 @@ async function loadAll() {
     ticketProjectHistories.value = historyData ?? []
     tasks.value = taskData ?? []
     logs.value = logData ?? []
+    bwsTasks.value = bwsTaskData ?? []
+    bwsLogs.value = bwsLogData ?? []
+    if (bwsTasks.value.length > 0 && selectedBWSTaskId.value === null) {
+      selectedBWSTaskId.value = bwsTasks.value[0].id
+    }
   })
 }
 
@@ -362,6 +493,7 @@ async function loginPanel() {
 async function bootConsole() {
   await loadAll()
   resetTaskForm()
+  resetBWSTaskForm()
   connectEvents()
   startClock()
 }
@@ -397,6 +529,16 @@ function clearPanelSession() {
   ticketProjectHistories.value = []
   tasks.value = []
   logs.value = []
+  bwsTasks.value = []
+  bwsLogs.value = []
+  bwsInfo.value = null
+  bwsItems.value = []
+  bwsMyReservations.value = []
+  selectedBWSItemId.value = null
+  selectedBWSTaskId.value = null
+  selectedTaskId.value = null
+  selectedLogKind.value = null
+  mobileLogMode.value = 'empty'
   session.value = null
   selectedAccountExportIds.value = []
 }
@@ -462,6 +604,7 @@ function sectionIcon(section: SectionKey) {
     notifications: Bell,
     proxies: Connection,
     taskConfig: Setting,
+    bws: Document,
     taskStatus: Monitor,
   }
   return map[section]
@@ -1258,6 +1401,20 @@ function normalizeTaskModeFields() {
   taskForm.endAt = ''
 }
 
+function normalizeBWSTaskProxyFields() {
+  if (!['scheduled', 'immediate'].includes(bwsTaskForm.mode)) {
+    bwsTaskForm.mode = 'scheduled'
+  }
+  bwsTaskForm.proxyGroupId = Number(bwsTaskForm.proxyGroupId || 0)
+  if (Number(bwsTaskForm.proxyGroupId || 0) <= 0) {
+    bwsTaskForm.proxyGroupId = 0
+    bwsTaskForm.proxyMode = 'round_robin'
+  }
+  if (!['round_robin', 'concurrent'].includes(bwsTaskForm.proxyMode)) {
+    bwsTaskForm.proxyMode = 'round_robin'
+  }
+}
+
 function handleTaskModeChange() {
   normalizeTaskModeFields()
   if (hasRestockTaskSection.value && selectedTicketValue.value && selectedTicketValues.value.length === 0) {
@@ -1659,11 +1816,202 @@ function restoreTicketSelectionFromTask(task: Task) {
   selectedAddressId.value = task.deliverInfo?.id ?? 0
 }
 
+function resetBWSTaskForm() {
+  editingBWSTaskId.value = null
+  selectedBWSItemId.value = null
+  Object.assign(bwsTaskForm, {
+	    name: '',
+	    accountId: bwsQueryForm.accountId || accounts.value[0]?.id || 0,
+	    proxyGroupId: 0,
+	    proxyMode: 'round_robin',
+	    reserveType: bwsQueryForm.reserveType || 'activity',
+    year: bwsQueryForm.year || '202601',
+    reserveDate: '',
+    ticketNo: '',
+    reserveId: 0,
+	    title: '',
+	    reserveBeginTime: 0,
+	    mode: 'scheduled',
+	    timeSyncStrategy: 'bilibili',
+    pollIntervalMillis: 1000,
+  })
+}
+
+async function fetchBWSInfo() {
+  await run(async () => {
+    if (bwsQueryForm.accountId <= 0) {
+      throw new Error('请先选择账号')
+    }
+    const info = await api.fetchBWSInfo({
+      accountId: bwsQueryForm.accountId,
+      year: bwsQueryForm.year.trim() || '202601',
+      reserveDates: bwsQueryForm.reserveDates.trim() || '20260710,20260711,20260712',
+      reserveType: bwsQueryForm.reserveType,
+    })
+    bwsInfo.value = info
+    bwsItems.value = info.items ?? []
+    bwsQueryForm.year = info.year || bwsQueryForm.year
+    bwsQueryForm.reserveDates = info.reserveDates || bwsQueryForm.reserveDates
+    bwsQueryForm.reserveType = info.reserveType || bwsQueryForm.reserveType
+    if (!bwsTaskForm.accountId) {
+      bwsTaskForm.accountId = bwsQueryForm.accountId
+    }
+  }, 'BWS 预约列表已拉取')
+}
+
+async function fetchBWSMyReservations() {
+  await run(async () => {
+    if (bwsQueryForm.accountId <= 0) {
+      throw new Error('请先选择账号')
+    }
+    const result = await api.fetchBWSMyReservations(bwsQueryForm.accountId, bwsQueryForm.year.trim() || '202601')
+    bwsMyReservations.value = result.items ?? []
+  }, '我的 BWS 预约已刷新')
+}
+
+function selectBWSItem(item: BWSItem) {
+  selectedBWSItemId.value = item.reserveId
+  Object.assign(bwsTaskForm, {
+    name: `BWS ${item.title}`.trim(),
+    accountId: bwsQueryForm.accountId || bwsTaskForm.accountId || accounts.value[0]?.id || 0,
+    reserveType: bwsQueryForm.reserveType || 'activity',
+    year: bwsQueryForm.year || '202601',
+    reserveDate: item.date,
+    ticketNo: item.ticketNo,
+    reserveId: item.reserveId,
+    title: item.title,
+    reserveBeginTime: item.effectiveReserveBeginTime || item.reserveBeginTime,
+  })
+}
+
+function editBWSTask(task: BWSTask) {
+  editingBWSTaskId.value = task.id
+  selectedBWSItemId.value = task.reserveId
+  Object.assign(bwsTaskForm, {
+	    name: task.name,
+	    accountId: task.accountId,
+	    proxyGroupId: task.proxyGroupId || 0,
+	    proxyMode: task.proxyMode || 'round_robin',
+	    reserveType: task.reserveType || 'activity',
+    year: task.year || '202601',
+    reserveDate: task.reserveDate,
+    ticketNo: task.ticketNo,
+    reserveId: task.reserveId,
+	    title: task.title,
+	    reserveBeginTime: task.reserveBeginTime,
+	    mode: task.mode || 'scheduled',
+	    timeSyncStrategy: task.timeSyncStrategy || 'bilibili',
+    pollIntervalMillis: task.pollIntervalMillis || 1000,
+  })
+  activeSection.value = 'bws'
+}
+
+async function saveBWSTask() {
+  await run(async () => {
+    normalizeBWSTaskProxyFields()
+    if (!canSaveBWSTask.value) {
+      throw new Error('请先选择 BWS 预约条目并补全任务配置')
+    }
+    if (bwsTaskForm.proxyMode === 'concurrent' && Number(bwsTaskForm.proxyGroupId || 0) <= 0) {
+      throw new Error('BWS 并发代理需要选择代理组')
+    }
+    if (editingBWSTaskId.value) {
+      await api.updateBWSTask(editingBWSTaskId.value, bwsTaskForm)
+    } else {
+      await api.createBWSTask(bwsTaskForm)
+    }
+    bwsTasks.value = await api.listBWSTasks()
+    resetBWSTaskForm()
+  }, editingBWSTaskId.value ? 'BWS 任务已更新' : 'BWS 任务已创建')
+}
+
+async function dispatchBWSTask(id: number) {
+  await run(async () => {
+    await api.dispatchBWSTask(id)
+    bwsTasks.value = await api.listBWSTasks()
+    if (selectedLogKind.value === 'bws' && selectedBWSTaskId.value) {
+      bwsLogs.value = await api.listBWSTaskLogs(selectedBWSTaskId.value)
+    } else if (selectedLogKind.value === null) {
+      bwsLogs.value = await api.listBWSLogs()
+    }
+  }, 'BWS 任务已启动')
+}
+
+async function pauseBWSTask(id: number) {
+  await run(async () => {
+    await api.pauseBWSTask(id)
+    bwsTasks.value = await api.listBWSTasks()
+    if (selectedLogKind.value === 'bws' && selectedBWSTaskId.value) {
+      bwsLogs.value = await api.listBWSTaskLogs(selectedBWSTaskId.value)
+    } else if (selectedLogKind.value === null) {
+      bwsLogs.value = await api.listBWSLogs()
+    }
+  }, 'BWS 任务已停止')
+}
+
+async function confirmDeleteBWSTask(task: BWSTask) {
+  try {
+    await ElMessageBox.confirm(`确认删除 BWS 预约任务「${task.name || task.title}」？`, '删除 BWS 任务', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+      confirmButtonClass: 'el-button--danger',
+    })
+  } catch {
+    return
+  }
+	await run(async () => {
+		await api.deleteBWSTask(task.id)
+		if (selectedBWSTaskId.value === task.id) {
+			selectedBWSTaskId.value = null
+			if (selectedLogKind.value === 'bws') {
+				selectedLogKind.value = null
+				mobileLogMode.value = 'empty'
+			}
+		}
+		bwsTasks.value = await api.listBWSTasks()
+		bwsLogs.value = selectedLogKind.value === null ? await api.listBWSLogs() : []
+	}, 'BWS 任务已删除')
+}
+
+async function selectBWSTaskLog(task: BWSTask) {
+  selectedBWSTaskId.value = task.id
+  selectedTaskId.value = null
+  selectedLogKind.value = 'bws'
+  activeSection.value = 'taskStatus'
+  await run(async () => {
+    bwsLogs.value = await api.listBWSTaskLogs(task.id)
+    logs.value = []
+  })
+}
+
+function upsertBWSTask(task: BWSTask) {
+  const index = bwsTasks.value.findIndex((item) => item.id === task.id)
+  if (index >= 0) {
+    bwsTasks.value.splice(index, 1, task)
+  } else {
+    bwsTasks.value.unshift(task)
+  }
+}
+
+function addBWSLog(log: BWSTaskLog) {
+  if (bwsLogs.value.some((item) => item.id === log.id)) {
+    return
+  }
+  if (selectedLogKind.value === 'ticket') {
+    return
+  }
+  if (selectedLogKind.value === 'bws' && selectedBWSTaskId.value && log.taskId !== selectedBWSTaskId.value) {
+    return
+  }
+  bwsLogs.value = [log, ...bwsLogs.value].slice(0, 200)
+}
+
 async function dispatchTask(id: number) {
   await run(async () => {
     await api.dispatchTask(id)
     tasks.value = await api.listTasks()
-    logs.value = await api.listLogs(selectedTaskId.value ?? undefined)
+    logs.value = await api.listLogs(selectedLogKind.value === 'ticket' ? selectedTaskId.value ?? undefined : undefined)
   }, '任务已下发')
 }
 
@@ -1671,7 +2019,7 @@ async function startTask(id: number) {
   await run(async () => {
     await api.dispatchTask(id)
     tasks.value = await api.listTasks()
-    logs.value = await api.listLogs(selectedTaskId.value ?? undefined)
+    logs.value = await api.listLogs(selectedLogKind.value === 'ticket' ? selectedTaskId.value ?? undefined : undefined)
   }, '任务已启动')
 }
 
@@ -1679,7 +2027,7 @@ async function stopTask(id: number) {
   await run(async () => {
     await api.pauseTask(id)
     tasks.value = await api.listTasks()
-    logs.value = await api.listLogs(selectedTaskId.value ?? undefined)
+    logs.value = await api.listLogs(selectedLogKind.value === 'ticket' ? selectedTaskId.value ?? undefined : undefined)
   }, '任务已停止')
 }
 
@@ -1705,40 +2053,47 @@ async function confirmDeleteTask(task: Task) {
 async function deleteTask(id: number) {
   await run(async () => {
     await api.deleteTask(id)
-    if (selectedTaskId.value === id) {
-      selectedTaskId.value = null
-      mobileLogMode.value = 'empty'
-    }
-    tasks.value = await api.listTasks()
-    logs.value = await api.listLogs()
+		if (selectedTaskId.value === id) {
+			selectedTaskId.value = null
+			if (selectedLogKind.value === 'ticket') {
+				selectedLogKind.value = null
+				mobileLogMode.value = 'empty'
+			}
+		}
+		tasks.value = await api.listTasks()
+		logs.value = await api.listLogs()
   }, '任务已删除')
 }
 
 async function selectTaskLog(task: Task) {
   selectedTaskId.value = task.id
+  selectedBWSTaskId.value = null
+  selectedLogKind.value = 'ticket'
   await run(async () => {
     logs.value = await api.listLogs(task.id)
+    bwsLogs.value = []
   })
-}
-
-async function selectMobileTaskLog(task: Task) {
-  mobileLogMode.value = 'task'
-  await selectTaskLog(task)
 }
 
 async function showAllLogs() {
   mobileLogMode.value = 'empty'
   selectedTaskId.value = null
+  selectedLogKind.value = null
   await run(async () => {
-    logs.value = await api.listLogs()
+    const [taskLogs, bwsTaskLogs] = await Promise.all([api.listLogs(), api.listBWSLogs()])
+    logs.value = taskLogs ?? []
+    bwsLogs.value = bwsTaskLogs ?? []
   })
 }
 
 async function showAllMobileLogs() {
   mobileLogMode.value = 'all'
   selectedTaskId.value = null
+  selectedLogKind.value = null
   await run(async () => {
-    logs.value = await api.listLogs()
+    const [taskLogs, bwsTaskLogs] = await Promise.all([api.listLogs(), api.listBWSLogs()])
+    logs.value = taskLogs ?? []
+    bwsLogs.value = bwsTaskLogs ?? []
   })
 }
 
@@ -1755,10 +2110,46 @@ function addLog(log: TaskLog) {
   if (logs.value.some((item) => item.id === log.id)) {
     return
   }
-  if (selectedTaskId.value && log.taskId !== selectedTaskId.value) {
+  if (selectedLogKind.value === 'bws') {
+    return
+  }
+  if (selectedLogKind.value === 'ticket' && selectedTaskId.value && log.taskId !== selectedTaskId.value) {
     return
   }
   logs.value = [log, ...logs.value].slice(0, 200)
+}
+
+async function selectManagedTaskLog(row: ManagedTaskRow) {
+  mobileLogMode.value = 'task'
+  if (row.kind === 'ticket') {
+    await selectTaskLog(row.task)
+    return
+  }
+  await selectBWSTaskLog(row.bwsTask)
+}
+
+async function startManagedTask(row: ManagedTaskRow) {
+  if (row.kind === 'ticket') {
+    await startTask(row.id)
+    return
+  }
+  await dispatchBWSTask(row.id)
+}
+
+async function stopManagedTask(row: ManagedTaskRow) {
+  if (row.kind === 'ticket') {
+    await stopTask(row.id)
+    return
+  }
+  await pauseBWSTask(row.id)
+}
+
+async function confirmDeleteManagedTask(row: ManagedTaskRow) {
+  if (row.kind === 'ticket') {
+    await confirmDeleteTask(row.task)
+    return
+  }
+  await confirmDeleteBWSTask(row.bwsTask)
 }
 
 function connectEvents() {
@@ -1782,19 +2173,42 @@ function connectEvents() {
     const snapshot = JSON.parse((event as MessageEvent).data) as EventSnapshot
     tasks.value = snapshot.tasks ?? []
     logs.value = snapshot.logs ?? []
+    bwsTasks.value = snapshot.bwsTasks ?? bwsTasks.value
+    bwsLogs.value = snapshot.bwsLogs ?? bwsLogs.value
   })
   source.addEventListener('task.updated', (event) => {
     upsertTask(JSON.parse((event as MessageEvent).data) as Task)
   })
   source.addEventListener('task.deleted', (event) => {
     const payload = JSON.parse((event as MessageEvent).data) as { id: number }
-    tasks.value = tasks.value.filter((task) => task.id !== payload.id)
-    if (selectedTaskId.value === payload.id) {
-      selectedTaskId.value = null
-    }
+	    tasks.value = tasks.value.filter((task) => task.id !== payload.id)
+	    if (selectedTaskId.value === payload.id) {
+	      selectedTaskId.value = null
+	      if (selectedLogKind.value === 'ticket') {
+	        selectedLogKind.value = null
+	        mobileLogMode.value = 'empty'
+	      }
+	    }
   })
   source.addEventListener('log.created', (event) => {
     addLog(JSON.parse((event as MessageEvent).data) as TaskLog)
+  })
+  source.addEventListener('bws.task.updated', (event) => {
+    upsertBWSTask(JSON.parse((event as MessageEvent).data) as BWSTask)
+  })
+  source.addEventListener('bws.task.deleted', (event) => {
+    const payload = JSON.parse((event as MessageEvent).data) as { id: number }
+	    bwsTasks.value = bwsTasks.value.filter((task) => task.id !== payload.id)
+	    if (selectedBWSTaskId.value === payload.id) {
+	      selectedBWSTaskId.value = null
+	      if (selectedLogKind.value === 'bws') {
+	        selectedLogKind.value = null
+	        mobileLogMode.value = 'empty'
+	      }
+	    }
+  })
+  source.addEventListener('bws.log.created', (event) => {
+    addBWSLog(JSON.parse((event as MessageEvent).data) as BWSTaskLog)
   })
 }
 
@@ -1985,6 +2399,7 @@ function statusLabel(status: string) {
     waiting_start: '等待起售',
     waiting_payment: '待支付',
     succeeded: '已成功',
+    success: '已成功',
     duplicate_order: '重复订单',
     paused: '已停止',
     running: '运行中',
@@ -1992,6 +2407,136 @@ function statusLabel(status: string) {
     waiting_user: '等待用户',
   }
   return map[status] ?? status
+}
+
+function bwsReserveTypeLabel(value: string) {
+  return value === 'goods' ? '商品购买资格' : '活动预约'
+}
+
+function bwsTaskModeLabel(value: string) {
+  return value === 'immediate' ? '立刻抢' : '等待开票'
+}
+
+function bwsReserveTimeLabel(item: Pick<BWSItem, 'effectiveReserveBeginTime' | 'reserveBeginTime'> | Pick<BWSTask, 'reserveBeginTime'>) {
+  const timestamp = 'effectiveReserveBeginTime' in item
+    ? item.effectiveReserveBeginTime || item.reserveBeginTime
+    : item.reserveBeginTime
+  return formatUnixSeconds(timestamp)
+}
+
+function managedTaskKey(kind: ManagedTaskKind, id: number) {
+  return `${kind}-${id}`
+}
+
+function managedTaskUpdatedAt(row: ManagedTaskRow) {
+  return row.kind === 'ticket' ? row.task.updatedAt : row.bwsTask.updatedAt
+}
+
+function compareDateText(left: string, right: string) {
+  const leftTime = Date.parse(left)
+  const rightTime = Date.parse(right)
+  if (!Number.isNaN(leftTime) && !Number.isNaN(rightTime)) {
+    return leftTime - rightTime
+  }
+  return left.localeCompare(right)
+}
+
+function managedTaskName(row: ManagedTaskRow) {
+  return row.kind === 'ticket' ? row.task.name : row.bwsTask.name
+}
+
+function managedTaskAccountName(row: ManagedTaskRow) {
+  return row.kind === 'ticket' ? row.task.accountName : row.bwsTask.accountName
+}
+
+function managedTaskStatus(row: ManagedTaskRow) {
+  return row.kind === 'ticket' ? row.task.status : row.bwsTask.status
+}
+
+function managedTaskLastMessage(row: ManagedTaskRow) {
+  return row.kind === 'ticket' ? row.task.lastMessage : row.bwsTask.lastMessage
+}
+
+function managedTaskLastCheckedAt(row: ManagedTaskRow) {
+  return row.kind === 'ticket' ? row.task.lastCheckedAt : row.bwsTask.lastCheckedAt
+}
+
+function managedTaskSourceLabel(row: ManagedTaskRow) {
+  return row.kind === 'ticket' ? '会员购' : 'BWS'
+}
+
+function managedTaskModeText(row: ManagedTaskRow) {
+  return row.kind === 'ticket' ? taskModeLabel(row.task) : `BWS · ${bwsTaskModeLabel(row.bwsTask.mode)}`
+}
+
+function managedTaskModeTagType(row: ManagedTaskRow) {
+  return row.kind === 'ticket' ? taskModeTagType(row.task) : 'success'
+}
+
+function managedTaskDetail(row: ManagedTaskRow) {
+  if (row.kind === 'ticket') {
+    return taskBuyerSummary(row.task)
+  }
+  return `${bwsReserveTypeLabel(row.bwsTask.reserveType)} · ${row.bwsTask.reserveDate || '-'} · 票号 ${row.bwsTask.ticketNo || '-'}`
+}
+
+function managedTaskTimeText(row: ManagedTaskRow) {
+  return row.kind === 'ticket' ? countdownText(row.task) : bwsCountdownText(row.bwsTask)
+}
+
+function managedTaskTimeSummary(row: ManagedTaskRow) {
+  return row.kind === 'ticket' ? timeSyncSummary(row.task) : bwsTimeSyncSummary(row.bwsTask)
+}
+
+function bwsCountdownText(task: BWSTask) {
+  if (task.mode === 'immediate') {
+    return '立刻抢'
+  }
+  if (!task.reserveBeginTime) {
+    return '-'
+  }
+  const remaining = task.reserveBeginTime * 1000 - (nowMs.value + (task.timeOffsetMillis || 0))
+  if (remaining <= 0) {
+    return '已到预约时间'
+  }
+  return formatDuration(remaining)
+}
+
+function bwsTimeSyncSummary(task: BWSTask) {
+  const sync = task.timeSyncStrategy === 'local'
+    ? '本地时间'
+    : task.timeSyncedAt
+      ? `${timeSyncStrategyLabel(task.timeSyncStrategy)} · offset ${(task.timeOffsetMillis || 0) >= 0 ? '+' : ''}${task.timeOffsetMillis || 0}ms`
+      : `${timeSyncStrategyLabel(task.timeSyncStrategy)} · 未同步`
+  return `${bwsReserveTypeLabel(task.reserveType)} · ${bwsTaskModeLabel(task.mode)} · ${sync}`
+}
+
+function bwsManagedSummary(task: BWSTask) {
+  return `${task.title || task.name} · ${bwsReserveTypeLabel(task.reserveType)} · ${task.reserveDate || '-'}`
+}
+
+function formatUnixSeconds(value: number) {
+  if (!value) {
+    return '-'
+  }
+  return new Date(value * 1000).toLocaleString('zh-CN', { hour12: false })
+}
+
+function bwsItemTagText(item: BWSItem) {
+  const tags = []
+  if (item.isVipTicket) {
+    tags.push(item.userIsVip ? 'VIP优先' : 'VIP场次')
+  }
+  if (item.isSecondPay) {
+    tags.push('二次付费')
+  }
+  if (item.reserved) {
+    tags.push('已预约')
+  }
+  if (item.state === 3) {
+    tags.push('已结束')
+  }
+  return tags.join(' · ')
 }
 
 function accountStatusLabel(account: Account) {
@@ -2093,11 +2638,11 @@ function proxyModeLabel(mode: string) {
   return mode === 'concurrent' ? '并发代理' : '循环代理'
 }
 
-function taskProxySummary(task: Pick<Task, 'proxyGroupName' | 'proxyMode'>) {
+function taskProxySummary(task: { proxyGroupName?: string; proxyMode?: string }) {
   if (!task.proxyGroupName) {
     return ''
   }
-  return `代理组：${task.proxyGroupName} · ${proxyModeLabel(task.proxyMode)}`
+  return `代理组：${task.proxyGroupName} · ${proxyModeLabel(task.proxyMode || 'round_robin')}`
 }
 
 function taskStatusClass(status: string) {
@@ -3155,120 +3700,328 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <section v-if="activeSection === 'taskStatus'" class="status-layout">
-        <section class="panel">
-          <div class="panel-heading">
-            <h3>任务状态</h3>
-            <span class="muted">SSE {{ sseStatus }} · {{ selectedTask?.name || '未选择任务' }}</span>
-          </div>
-          <el-table :data="tasks" class="desktop-task-table" row-key="id" empty-text="暂无任务">
-            <el-table-column label="任务" min-width="220">
-              <template #default="{ row }">
-                <strong>{{ row.name }}</strong>
-                <small>模式：{{ taskModeLabel(row) }}</small>
-                <small v-if="row.proxyGroupName">{{ taskProxySummary(row) }}</small>
-                <small>{{ taskBuyerSummary(row) }}</small>
-              </template>
-            </el-table-column>
-            <el-table-column prop="accountName" label="账号" min-width="130" />
-            <el-table-column label="状态" width="110">
-              <template #default="{ row }">
-                <el-tag :type="taskStatusTagType(row.status)">{{ statusLabel(row.status) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="倒计时/时间源" min-width="170">
-              <template #default="{ row }">
-                <strong>{{ countdownText(row) }}</strong>
-                <small>{{ timeSyncSummary(row) }}</small>
-              </template>
-            </el-table-column>
-            <el-table-column prop="lastMessage" label="最近消息" min-width="220" show-overflow-tooltip />
-            <el-table-column label="最近检测" min-width="170">
-              <template #default="{ row }">
-                <span>{{ lastCheckedText(row.lastCheckedAt) }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="支付" min-width="130">
-              <template #default="{ row }">
-                <div v-if="row.status === 'waiting_payment' && row.paymentUrl" class="payment-cell">
-                  <img v-if="row.paymentQrImageDataUrl" :src="row.paymentQrImageDataUrl" alt="支付二维码" />
-                  <el-button size="small" :icon="CopyDocument" @click="copyPaymentUrl(row)">复制链接</el-button>
-                </div>
-                <span v-else>-</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="260" fixed="right">
-              <template #default="{ row }">
-                <div class="table-actions">
-                  <el-button size="small" :icon="View" @click="selectTaskLog(row)">日志</el-button>
-                  <el-button size="small" type="primary" :icon="VideoPlay" @click="startTask(row.id)">启动</el-button>
-                  <el-button size="small" :icon="SwitchButton" @click="stopTask(row.id)">停止</el-button>
-                  <el-button size="small" type="danger" plain :icon="Delete" @click="confirmDeleteTask(row)">删除</el-button>
-                </div>
-              </template>
-            </el-table-column>
-          </el-table>
-          <div class="mobile-task-list">
-            <article v-for="task in tasks" :key="task.id" class="item-card">
-              <div class="mobile-task-main">
-                <h4>{{ task.name }}</h4>
-                <p>{{ task.accountName || '-' }} · {{ countdownText(task) }}</p>
-                <small v-if="task.proxyGroupName">{{ taskProxySummary(task) }}</small>
-                <small>{{ taskBuyerSummary(task) }}</small>
-                <small>{{ timeSyncSummary(task) }}</small>
-                <small>{{ lastCheckedSummary(task) }}</small>
-                <small class="mobile-task-message">{{ task.lastMessage || '-' }}</small>
+      <section v-if="activeSection === 'bws'" class="content-grid bws-layout">
+        <div class="stack-column">
+          <el-form class="panel form-panel bws-info-panel" label-position="top" @submit.prevent="fetchBWSInfo">
+            <div class="panel-heading">
+              <h3>BWS 预约信息</h3>
+              <span class="muted">{{ filteredBWSItems.length }}/{{ bwsItems.length }} 个条目</span>
+            </div>
+            <el-form-item required label="账号">
+              <el-select v-model="bwsQueryForm.accountId" placeholder="选择账号" filterable>
+                <el-option v-for="account in accounts" :key="account.id" :value="account.id" :label="account.name" />
+              </el-select>
+            </el-form-item>
+            <el-row :gutter="12">
+              <el-col :xs="24" :sm="10">
+                <el-form-item required label="年份">
+                  <el-input v-model="bwsQueryForm.year" placeholder="202601" clearable />
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :sm="14">
+                <el-form-item required label="预约日期">
+                  <el-input v-model="bwsQueryForm.reserveDates" placeholder="20260710,20260711,20260712" clearable />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-form-item required label="预约类型">
+              <el-radio-group v-model="bwsQueryForm.reserveType">
+                <el-radio-button label="activity">活动预约</el-radio-button>
+                <el-radio-button label="goods">商品购买资格</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+            <div class="table-actions">
+              <el-checkbox v-model="bwsHideEnded">隐藏已结束</el-checkbox>
+              <el-checkbox v-model="bwsHideReserved">隐藏已预约</el-checkbox>
+            </div>
+            <div class="form-actions">
+              <el-button native-type="submit" type="primary" :icon="Refresh" :loading="loading" :disabled="bwsQueryForm.accountId <= 0">
+                拉取列表
+              </el-button>
+              <el-button :icon="View" :loading="loading" :disabled="bwsQueryForm.accountId <= 0" @click="fetchBWSMyReservations">
+                我的预约
+              </el-button>
+            </div>
+          </el-form>
+
+          <el-form class="panel form-panel" label-position="top" @submit.prevent="saveBWSTask">
+            <div class="panel-heading">
+              <h3>{{ editingBWSTaskId ? '编辑 BWS 任务' : '新增 BWS 任务' }}</h3>
+              <el-button :icon="Close" text @click="resetBWSTaskForm">清空</el-button>
+            </div>
+            <el-form-item required label="任务名称">
+              <el-input v-model="bwsTaskForm.name" placeholder="选择条目后自动填充" clearable />
+            </el-form-item>
+            <el-row :gutter="12">
+              <el-col :xs="24" :sm="12">
+                <el-form-item required label="账号">
+                  <el-select v-model="bwsTaskForm.accountId" filterable>
+                    <el-option v-for="account in accounts" :key="account.id" :value="account.id" :label="account.name" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+	              <el-col :xs="24" :sm="12">
+	                <el-form-item label="时间同步策略">
+	                  <el-select v-model="bwsTaskForm.timeSyncStrategy">
+	                    <el-option value="bilibili" label="哔哩哔哩时间" />
+	                    <el-option value="local" label="本地时间" />
+	                  </el-select>
+	                </el-form-item>
+	              </el-col>
+	              <el-col :xs="24" :sm="12">
+	                <el-form-item label="执行模式">
+	                  <el-radio-group v-model="bwsTaskForm.mode" @change="normalizeBWSTaskProxyFields">
+	                    <el-radio-button value="scheduled">等待开票</el-radio-button>
+	                    <el-radio-button value="immediate">立刻抢</el-radio-button>
+	                  </el-radio-group>
+	                </el-form-item>
+	              </el-col>
+	            </el-row>
+            <el-row :gutter="12">
+	              <el-col :xs="24" :sm="12">
+	                <el-form-item required label="循环间隔（ms）">
+	                  <el-input-number v-model="bwsTaskForm.pollIntervalMillis" :min="1" controls-position="right" class="full-input" />
+	                </el-form-item>
+	              </el-col>
+	              <el-col :xs="24" :sm="12">
+	                <el-form-item label="代理组">
+	                  <el-select v-model="bwsTaskForm.proxyGroupId" placeholder="不使用代理" filterable clearable @change="normalizeBWSTaskProxyFields">
+	                    <el-option :value="0" label="不使用代理" />
+	                    <el-option
+	                      v-for="group in selectableProxyGroups"
+	                      :key="group.id"
+	                      :value="group.id"
+	                      :label="proxyGroupOptionLabel(group)"
+	                    />
+	                  </el-select>
+	                </el-form-item>
+	              </el-col>
+	              <el-col v-if="Number(bwsTaskForm.proxyGroupId || 0) > 0" :xs="24" :sm="12">
+	                <el-form-item label="代理模式">
+	                  <el-radio-group v-model="bwsTaskForm.proxyMode" @change="normalizeBWSTaskProxyFields">
+	                    <el-radio-button value="round_robin">循环代理</el-radio-button>
+	                    <el-radio-button value="concurrent">并发代理</el-radio-button>
+	                  </el-radio-group>
+	                </el-form-item>
+	              </el-col>
+	              <el-col v-if="Number(bwsTaskForm.proxyGroupId || 0) > 0" :xs="24">
+	                <p class="field-hint">代理只用于 BWS 预约执行请求；活动列表和我的预约仍直连。</p>
+	              </el-col>
+	            </el-row>
+            <div class="ticket-summary" v-if="bwsTaskForm.reserveId">
+              <strong>{{ bwsTaskForm.title }}</strong>
+              <span>{{ bwsReserveTypeLabel(bwsTaskForm.reserveType) }} · {{ bwsTaskForm.reserveDate }}</span>
+              <span>预约 ID {{ bwsTaskForm.reserveId }} · 票号 {{ bwsTaskForm.ticketNo }}</span>
+              <span>预约开始 {{ bwsReserveTimeLabel(bwsTaskForm) }}</span>
+            </div>
+            <el-button native-type="submit" type="primary" :icon="Document" :disabled="!canSaveBWSTask" :loading="loading">
+              保存 BWS 任务
+            </el-button>
+          </el-form>
+
+          <section class="panel list-panel">
+            <div class="panel-heading">
+              <h3>我的预约</h3>
+              <span class="muted">{{ bwsMyReservations.length }} 条</span>
+            </div>
+            <article v-for="item in bwsMyReservations" :key="`${item.date}-${item.reserveId}-${item.reserveNo}`" class="item-card">
+              <div>
+                <h4>{{ item.title }}</h4>
+                <p>{{ item.date }} · {{ item.reserveLocation || '-' }}</p>
+                <small>#{{ item.reserveNo || '-' }} · {{ formatUnixSeconds(item.actBeginTime) }} - {{ formatUnixSeconds(item.actEndTime) }}</small>
               </div>
               <div class="actions">
-                <el-tag :type="taskModeTagType(task)">{{ taskModeLabel(task) }}</el-tag>
-                <el-tag :type="taskStatusTagType(task.status)">{{ statusLabel(task.status) }}</el-tag>
-                <el-button :icon="View" @click="selectMobileTaskLog(task)">日志</el-button>
-                <el-button type="primary" :icon="VideoPlay" @click="startTask(task.id)">启动</el-button>
-                <el-button :icon="SwitchButton" @click="stopTask(task.id)">停止</el-button>
-                <el-button type="danger" plain :icon="Delete" @click="confirmDeleteTask(task)">删除</el-button>
+                <el-tag type="success">{{ item.status || '预约成功' }}</el-tag>
               </div>
             </article>
-            <el-empty v-if="tasks.length === 0" description="暂无任务" />
-            <section class="mobile-log-panel">
-              <div class="mobile-log-toolbar">
-                <div class="log-heading-title">
-                  <h3>{{ mobileLogMode === 'all' ? '全部日志' : mobileLogMode === 'task' ? '运行日志' : '日志显示区' }}</h3>
-                  <small v-if="mobileLogMode === 'task' && selectedTaskTicketSubtitle" class="muted log-subtitle">
-                    {{ selectedTaskTicketSubtitle }}
-                  </small>
-                </div>
-                <el-button text :icon="Document" @click="showAllMobileLogs">全部日志</el-button>
+            <el-empty v-if="bwsMyReservations.length === 0" description="暂无我的预约" />
+          </section>
+        </div>
+
+        <div class="stack-column">
+          <section class="panel list-panel">
+            <div class="panel-heading">
+              <h3>BWS 条目</h3>
+              <span class="muted">{{ bwsReserveTypeLabel(bwsQueryForm.reserveType) }}</span>
+            </div>
+            <article
+              v-for="item in filteredBWSItems"
+              :key="`${item.date}-${item.reserveId}`"
+              class="item-card"
+              :class="{ selected: selectedBWSItemId === item.reserveId }"
+            >
+              <div>
+                <h4>{{ item.title }}</h4>
+                <p>{{ item.date }} · {{ formatUnixSeconds(item.actBeginTime) }} · {{ item.reserveLocation || '-' }}</p>
+                <small>预约开始：{{ bwsReserveTimeLabel(item) }} · 票号：{{ item.ticketNo || '-' }}</small>
+                <small v-if="item.describeInfo">{{ item.describeInfo }}</small>
               </div>
-              <template v-if="mobileLogMode !== 'empty'">
-                <article v-for="log in logs" :key="log.id" class="mobile-log-line">
-                  <div class="mobile-log-meta">
-                    <el-tag :type="logLevelTagType(log.level)" size="small">{{ log.level }}</el-tag>
-                    <time>{{ log.createdAt }}</time>
-                  </div>
-                  <p>{{ log.message }}</p>
-                </article>
-                <el-empty v-if="logs.length === 0" description="暂无日志" />
-              </template>
-              <el-empty v-else description="请选择任务查看日志，或查看全部日志" />
-            </section>
+              <div class="actions">
+                <el-tag v-if="bwsItemTagText(item)" type="warning">{{ bwsItemTagText(item) }}</el-tag>
+                <el-button type="primary" :icon="CirclePlus" :disabled="!item.ticketNo" @click="selectBWSItem(item)">生成任务</el-button>
+              </div>
+            </article>
+            <el-empty v-if="filteredBWSItems.length === 0" description="暂无 BWS 条目" />
+          </section>
+
+          <section class="panel list-panel">
+            <div class="panel-heading">
+              <h3>BWS 任务</h3>
+              <span class="muted">{{ bwsTasks.length }} 个任务</span>
+            </div>
+            <article v-for="task in bwsTasks" :key="task.id" class="item-card">
+              <div>
+                <h4>{{ task.name }}</h4>
+	                <p>{{ task.title }} · {{ task.accountName || '-' }}</p>
+	                <small>{{ bwsReserveTypeLabel(task.reserveType) }} · {{ task.reserveDate }}</small>
+	                <small>{{ bwsTaskModeLabel(task.mode) }} · 预约开始：{{ bwsReserveTimeLabel(task) }} · 间隔 {{ task.pollIntervalMillis }}ms</small>
+	                <small v-if="task.proxyGroupName">{{ taskProxySummary(task) }}</small>
+	                <small>{{ task.lastMessage || '-' }}</small>
+	              </div>
+              <div class="actions">
+                <el-tag :type="taskStatusTagType(task.status)">{{ statusLabel(task.status) }}</el-tag>
+                <el-button :icon="View" @click="selectBWSTaskLog(task)">日志</el-button>
+                <el-button type="primary" :icon="VideoPlay" @click="dispatchBWSTask(task.id)">启动</el-button>
+                <el-button :icon="SwitchButton" @click="pauseBWSTask(task.id)">停止</el-button>
+                <el-button :icon="Edit" :disabled="task.status === 'running' || task.status === 'waiting_start'" @click="editBWSTask(task)">编辑</el-button>
+                <el-button type="danger" plain :icon="Delete" @click="confirmDeleteBWSTask(task)">删除</el-button>
+              </div>
+            </article>
+            <el-empty v-if="bwsTasks.length === 0" description="暂无 BWS 任务" />
+          </section>
+
+	        </div>
+	      </section>
+
+      <section v-if="activeSection === 'taskStatus'" class="status-layout">
+        <section class="panel">
+	          <div class="panel-heading">
+	            <h3>任务状态</h3>
+	            <span class="muted">SSE {{ sseStatus }} · {{ selectedManagedTask ? managedTaskName(selectedManagedTask) : '未选择任务' }}</span>
+	          </div>
+	          <el-table :data="managedTasks" class="desktop-task-table" row-key="key" empty-text="暂无任务">
+	            <el-table-column label="任务" min-width="220">
+	              <template #default="{ row }">
+	                <strong>{{ managedTaskName(row) }}</strong>
+	                <small>
+	                  <span>模式：{{ managedTaskModeText(row) }}</span>
+	                </small>
+	                <small v-if="row.kind === 'ticket' && row.task.proxyGroupName">{{ taskProxySummary(row.task) }}</small>
+	                <small v-if="row.kind === 'bws' && row.bwsTask.proxyGroupName">{{ taskProxySummary(row.bwsTask) }}</small>
+	                <small>{{ managedTaskDetail(row) }}</small>
+	              </template>
+	            </el-table-column>
+	            <el-table-column label="账号" min-width="130">
+	              <template #default="{ row }">
+	                {{ managedTaskAccountName(row) || '-' }}
+	              </template>
+	            </el-table-column>
+	            <el-table-column label="状态" width="110">
+	              <template #default="{ row }">
+	                <el-tag :type="taskStatusTagType(managedTaskStatus(row))">{{ statusLabel(managedTaskStatus(row)) }}</el-tag>
+	              </template>
+	            </el-table-column>
+	            <el-table-column label="倒计时/时间源" min-width="170">
+	              <template #default="{ row }">
+	                <strong>{{ managedTaskTimeText(row) }}</strong>
+	                <small>{{ managedTaskTimeSummary(row) }}</small>
+	              </template>
+	            </el-table-column>
+	            <el-table-column label="最近消息" min-width="220" show-overflow-tooltip>
+	              <template #default="{ row }">
+	                {{ managedTaskLastMessage(row) || '-' }}
+	              </template>
+	            </el-table-column>
+	            <el-table-column label="最近检测" min-width="170">
+	              <template #default="{ row }">
+	                <span>{{ lastCheckedText(managedTaskLastCheckedAt(row)) }}</span>
+	              </template>
+	            </el-table-column>
+	            <el-table-column label="支付" min-width="130">
+	              <template #default="{ row }">
+	                <div v-if="row.kind === 'ticket' && row.task.status === 'waiting_payment' && row.task.paymentUrl" class="payment-cell">
+	                  <img v-if="row.task.paymentQrImageDataUrl" :src="row.task.paymentQrImageDataUrl" alt="支付二维码" />
+	                  <el-button size="small" :icon="CopyDocument" @click="copyPaymentUrl(row.task)">复制链接</el-button>
+	                </div>
+	                <span v-else>-</span>
+	              </template>
+	            </el-table-column>
+	            <el-table-column label="操作" width="260" fixed="right">
+	              <template #default="{ row }">
+	                <div class="table-actions">
+	                  <el-button size="small" :icon="View" @click="selectManagedTaskLog(row)">日志</el-button>
+	                  <el-button size="small" type="primary" :icon="VideoPlay" @click="startManagedTask(row)">启动</el-button>
+	                  <el-button size="small" :icon="SwitchButton" @click="stopManagedTask(row)">停止</el-button>
+	                  <el-button size="small" type="danger" plain :icon="Delete" @click="confirmDeleteManagedTask(row)">删除</el-button>
+	                </div>
+	              </template>
+	            </el-table-column>
+	          </el-table>
+	          <div class="mobile-task-list">
+	            <article v-for="row in managedTasks" :key="row.key" class="item-card">
+	              <div class="mobile-task-main">
+	                <h4>{{ managedTaskName(row) }}</h4>
+	                <p>{{ managedTaskAccountName(row) || '-' }} · {{ managedTaskTimeText(row) }}</p>
+	                <small>
+	                  {{ managedTaskSourceLabel(row) }} · {{ managedTaskModeText(row) }}
+	                </small>
+	                <small v-if="row.kind === 'ticket' && row.task.proxyGroupName">{{ taskProxySummary(row.task) }}</small>
+	                <small v-if="row.kind === 'bws' && row.bwsTask.proxyGroupName">{{ taskProxySummary(row.bwsTask) }}</small>
+	                <small>{{ managedTaskDetail(row) }}</small>
+	                <small>{{ managedTaskTimeSummary(row) }}</small>
+	                <small>{{ lastCheckedSummary({ lastCheckedAt: managedTaskLastCheckedAt(row) }) }}</small>
+	                <small class="mobile-task-message">{{ managedTaskLastMessage(row) || '-' }}</small>
+	              </div>
+	              <div class="actions">
+	                <el-tag :type="managedTaskModeTagType(row)">{{ managedTaskModeText(row) }}</el-tag>
+	                <el-tag :type="taskStatusTagType(managedTaskStatus(row))">{{ statusLabel(managedTaskStatus(row)) }}</el-tag>
+	                <el-button :icon="View" @click="selectManagedTaskLog(row)">日志</el-button>
+	                <el-button type="primary" :icon="VideoPlay" @click="startManagedTask(row)">启动</el-button>
+	                <el-button :icon="SwitchButton" @click="stopManagedTask(row)">停止</el-button>
+	                <el-button type="danger" plain :icon="Delete" @click="confirmDeleteManagedTask(row)">删除</el-button>
+	              </div>
+	            </article>
+	            <el-empty v-if="managedTasks.length === 0" description="暂无任务" />
+	            <section class="mobile-log-panel">
+	              <div class="mobile-log-toolbar">
+	                <div class="log-heading-title">
+	                  <h3>{{ mobileLogMode === 'all' ? '全部日志' : mobileLogMode === 'task' ? '运行日志' : '日志显示区' }}</h3>
+	                  <small v-if="mobileLogMode === 'task' && selectedLogSubtitle" class="muted log-subtitle">
+	                    {{ selectedLogSubtitle }}
+	                  </small>
+	                </div>
+	                <el-button text :icon="Document" @click="showAllMobileLogs">全部日志</el-button>
+	              </div>
+	              <template v-if="mobileLogMode !== 'empty'">
+	                <article v-for="log in managedLogs" :key="log.key" class="mobile-log-line">
+	                  <div class="mobile-log-meta">
+	                    <el-tag :type="logLevelTagType(log.level)" size="small">{{ log.level }}</el-tag>
+	                    <time>{{ log.createdAt }}</time>
+	                  </div>
+	                  <p>{{ log.message }}</p>
+	                </article>
+	                <el-empty v-if="managedLogs.length === 0" description="暂无日志" />
+	              </template>
+	              <el-empty v-else description="请选择任务查看日志，或查看全部日志" />
+	            </section>
           </div>
         </section>
 
         <section class="panel log-panel">
-          <div class="panel-heading">
-            <div class="log-heading-title">
-              <h3>运行日志</h3>
-              <small v-if="selectedTaskTicketSubtitle" class="muted log-subtitle">{{ selectedTaskTicketSubtitle }}</small>
-            </div>
-            <el-button text :icon="Document" @click="showAllLogs">全部</el-button>
-          </div>
-          <article v-for="log in logs" :key="log.id" class="log-line">
-            <el-tag :type="logLevelTagType(log.level)" size="small">{{ log.level }}</el-tag>
-            <p>{{ log.message }}</p>
-            <time>{{ log.createdAt }}</time>
-          </article>
-          <el-empty v-if="logs.length === 0" description="暂无日志" />
-        </section>
+	          <div class="panel-heading">
+	            <div class="log-heading-title">
+	              <h3>运行日志</h3>
+	              <small v-if="selectedLogSubtitle" class="muted log-subtitle">{{ selectedLogSubtitle }}</small>
+	            </div>
+	            <el-button text :icon="Document" @click="showAllLogs">全部</el-button>
+		          </div>
+		          <article v-for="log in managedLogs" :key="log.key" class="log-line">
+		            <el-tag :type="logLevelTagType(log.level)" size="small">{{ log.level }}</el-tag>
+		            <p>{{ log.message }}</p>
+		            <time>{{ log.createdAt }}</time>
+		          </article>
+	          <el-empty v-if="managedLogs.length === 0" description="暂无日志" />
+	        </section>
       </section>
     </el-main>
   </el-container>

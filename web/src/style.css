@@ -289,6 +289,17 @@ p {
   position: static;
 }
 
+.bws-layout .form-panel {
+  position: static;
+}
+
+.bws-info-panel {
+  position: sticky;
+  z-index: 20;
+  top: 24px;
+  align-self: start;
+}
+
 .list-panel {
   align-content: start;
 }
@@ -829,6 +840,10 @@ p {
   }
 
   .form-panel {
+    position: static;
+  }
+
+  .bws-info-panel {
     position: static;
   }
 

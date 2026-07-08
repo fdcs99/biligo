@@ -251,6 +251,152 @@ func TestImportExportAccount(t *testing.T) {
 	}
 }
 
+func TestBWSTaskCRUDAndLogs(t *testing.T) {
+	taskStore, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer taskStore.Close()
+
+	account, err := taskStore.CreateAccount(context.Background(), model.AccountInput{
+		Name:   "BWS账号",
+		Cookie: "SESSDATA=x; bili_jct=csrf",
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	proxyGroup, err := taskStore.CreateProxyGroup(context.Background(), model.ProxyGroupInput{
+		Name: "BWS代理",
+		Type: model.ProxyGroupTypeStatic,
+	})
+	if err != nil {
+		t.Fatalf("CreateProxyGroup: %v", err)
+	}
+
+	task, err := taskStore.CreateBWSTask(context.Background(), model.BWSTaskInput{
+		Name:               "BWS测试",
+		AccountID:          account.ID,
+		ReserveType:        model.BWSReserveTypeGoods,
+		Year:               "202601",
+		ReserveDate:        "20260710",
+		TicketNo:           "TICKET-10",
+		ReserveID:          12345,
+		Title:              "测试活动",
+		ReserveBeginTime:   1783670000,
+		TimeSyncStrategy:   model.TimeSyncStrategyLocal,
+		PollIntervalMillis: 50,
+	})
+	if err != nil {
+		t.Fatalf("CreateBWSTask: %v", err)
+	}
+	if task.AccountName != account.Name || task.ReserveType != model.BWSReserveTypeGoods || task.PollIntervalMillis != 50 {
+		t.Fatalf("created task = %#v", task)
+	}
+	if task.ProxyGroupID != 0 || task.ProxyMode != model.ProxyModeRoundRobin {
+		t.Fatalf("default proxy fields = %d/%q", task.ProxyGroupID, task.ProxyMode)
+	}
+	if task.Mode != model.BWSTaskModeScheduled {
+		t.Fatalf("default BWS mode = %q, want %q", task.Mode, model.BWSTaskModeScheduled)
+	}
+	if _, err := taskStore.db.ExecContext(context.Background(), `UPDATE bws_tasks SET pre_start_offset_ms = -10000, concurrency = 20 WHERE id = ?`, task.ID); err != nil {
+		t.Fatalf("set legacy bws columns: %v", err)
+	}
+
+	task, err = taskStore.UpdateBWSTask(context.Background(), task.ID, model.BWSTaskInput{
+		Name:               "BWS测试更新",
+		AccountID:          account.ID,
+		ProxyGroupID:       proxyGroup.ID,
+		ProxyMode:          model.ProxyModeConcurrent,
+		ReserveType:        model.BWSReserveTypeActivity,
+		Year:               "202601",
+		ReserveDate:        "20260711",
+		TicketNo:           "TICKET-11",
+		ReserveID:          67890,
+		Title:              "测试活动2",
+		ReserveBeginTime:   1783671000,
+		Mode:               model.BWSTaskModeImmediate,
+		TimeSyncStrategy:   model.TimeSyncStrategyBilibili,
+		PollIntervalMillis: 80,
+	})
+	if err != nil {
+		t.Fatalf("UpdateBWSTask: %v", err)
+	}
+	if task.ReserveType != model.BWSReserveTypeActivity || task.ReserveID != 67890 || task.PollIntervalMillis != 80 {
+		t.Fatalf("updated task = %#v", task)
+	}
+	if task.ProxyGroupID != proxyGroup.ID || task.ProxyGroupName != proxyGroup.Name || task.ProxyMode != model.ProxyModeConcurrent {
+		t.Fatalf("updated task proxy fields = %#v", task)
+	}
+	if task.Mode != model.BWSTaskModeImmediate {
+		t.Fatalf("updated BWS mode = %q, want %q", task.Mode, model.BWSTaskModeImmediate)
+	}
+	var legacyOffset int
+	var legacyConcurrency int
+	if err := taskStore.db.QueryRowContext(context.Background(), `SELECT pre_start_offset_ms, concurrency FROM bws_tasks WHERE id = ?`, task.ID).Scan(&legacyOffset, &legacyConcurrency); err != nil {
+		t.Fatalf("query legacy bws columns: %v", err)
+	}
+	if legacyOffset != -10000 || legacyConcurrency != 20 {
+		t.Fatalf("legacy columns changed unexpectedly: %d/%d", legacyOffset, legacyConcurrency)
+	}
+
+	defaultIntervalTask, err := taskStore.CreateBWSTask(context.Background(), model.BWSTaskInput{
+		Name:             "BWS默认间隔",
+		AccountID:        account.ID,
+		ReserveType:      model.BWSReserveTypeActivity,
+		Year:             "202601",
+		ReserveDate:      "20260712",
+		TicketNo:         "TICKET-12",
+		ReserveID:        13579,
+		Title:            "测试活动3",
+		ReserveBeginTime: 1783672000,
+		TimeSyncStrategy: model.TimeSyncStrategyLocal,
+	})
+	if err != nil {
+		t.Fatalf("CreateBWSTask default interval: %v", err)
+	}
+	if defaultIntervalTask.PollIntervalMillis != 1000 {
+		t.Fatalf("default BWS poll interval = %d, want 1000", defaultIntervalTask.PollIntervalMillis)
+	}
+	if defaultIntervalTask.ProxyMode != model.ProxyModeRoundRobin {
+		t.Fatalf("default BWS proxy mode = %q, want %q", defaultIntervalTask.ProxyMode, model.ProxyModeRoundRobin)
+	}
+
+	task, log, err := taskStore.SetBWSTaskTimeSync(context.Background(), task.ID, model.TimeSyncStrategyBilibili, 12, "2026-07-07T10:00:00+08:00", "BWS 时间同步完成")
+	if err != nil {
+		t.Fatalf("SetBWSTaskTimeSync: %v", err)
+	}
+	if log.ID == 0 || task.TimeOffsetMillis != 12 || task.TimeSyncedAt == "" {
+		t.Fatalf("time sync task/log = %#v/%#v", task, log)
+	}
+
+	task, log, err = taskStore.SetBWSTaskRuntime(context.Background(), task.ID, model.BWSTaskRuntimeUpdate{
+		Status:      "running",
+		LastMessage: "BWS 正在运行",
+	}, "info")
+	if err != nil {
+		t.Fatalf("SetBWSTaskRuntime: %v", err)
+	}
+	if log.ID == 0 || task.Status != "running" {
+		t.Fatalf("runtime task/log = %#v/%#v", task, log)
+	}
+
+	paused, logs, err := taskStore.PauseActiveBWSTasks(context.Background(), "暂停 BWS")
+	if err != nil {
+		t.Fatalf("PauseActiveBWSTasks: %v", err)
+	}
+	if len(paused) != 1 || len(logs) != 1 || paused[0].Status != "paused" {
+		t.Fatalf("paused/logs = %#v/%#v", paused, logs)
+	}
+
+	listedLogs, err := taskStore.ListBWSTaskLogs(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("ListBWSTaskLogs: %v", err)
+	}
+	if len(listedLogs) == 0 {
+		t.Fatal("expected BWS logs")
+	}
+}
+
 func TestMigrateCreatesCurrentTaskSchemaOnly(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {
@@ -263,6 +409,14 @@ func TestMigrateCreatesCurrentTaskSchemaOnly(t *testing.T) {
 	}
 	if !tableExists(t, store, "notifications") {
 		t.Fatal("notifications table should be created")
+	}
+	if !tableExists(t, store, "bws_tasks") || !tableExists(t, store, "bws_task_logs") {
+		t.Fatal("bws task tables should be created")
+	}
+	for _, column := range []string{"mode", "pre_start_offset_ms", "concurrency"} {
+		if !columnExists(t, store, "bws_tasks", column) {
+			t.Fatalf("bws_tasks.%s legacy column should exist", column)
+		}
 	}
 	if columnExists(t, store, "tasks", "ticket_group_id") {
 		t.Fatal("tasks.ticket_group_id should not be created")
@@ -525,6 +679,46 @@ func TestProxyStoreCRUDAndTaskReference(t *testing.T) {
 	}
 	if !inUse {
 		t.Fatal("ProxyGroupInUse = false, want true")
+	}
+
+	bwsGroup, err := store.CreateProxyGroup(context.Background(), model.ProxyGroupInput{
+		Name: "BWS运行代理",
+		Type: model.ProxyGroupTypeStatic,
+	})
+	if err != nil {
+		t.Fatalf("CreateProxyGroup bws: %v", err)
+	}
+	account, err := store.CreateAccount(context.Background(), model.AccountInput{Name: "BWS账号", Cookie: "SESSDATA=x; bili_jct=csrf"})
+	if err != nil {
+		t.Fatalf("CreateAccount bws: %v", err)
+	}
+	bwsTask, err := store.CreateBWSTask(context.Background(), model.BWSTaskInput{
+		Name:               "BWS代理任务",
+		AccountID:          account.ID,
+		ProxyGroupID:       bwsGroup.ID,
+		ProxyMode:          model.ProxyModeRoundRobin,
+		ReserveType:        model.BWSReserveTypeActivity,
+		Year:               "202601",
+		ReserveDate:        "20260710",
+		TicketNo:           "TICKET-10",
+		ReserveID:          12345,
+		Title:              "BWS活动",
+		ReserveBeginTime:   1783670000,
+		TimeSyncStrategy:   model.TimeSyncStrategyLocal,
+		PollIntervalMillis: 1000,
+	})
+	if err != nil {
+		t.Fatalf("CreateBWSTask proxy: %v", err)
+	}
+	if _, _, err := store.SetBWSTaskRuntime(context.Background(), bwsTask.ID, model.BWSTaskRuntimeUpdate{Status: "running", LastMessage: "running"}, "info"); err != nil {
+		t.Fatalf("SetBWSTaskRuntime: %v", err)
+	}
+	inUse, err = store.ProxyGroupInUse(context.Background(), bwsGroup.ID)
+	if err != nil {
+		t.Fatalf("ProxyGroupInUse bws: %v", err)
+	}
+	if !inUse {
+		t.Fatal("ProxyGroupInUse for BWS = false, want true")
 	}
 }
 

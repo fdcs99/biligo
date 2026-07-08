@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fdcs99/biligo/internal/applog"
+	"github.com/fdcs99/biligo/internal/bwsrunner"
 	"github.com/fdcs99/biligo/internal/config"
 	"github.com/fdcs99/biligo/internal/httpapi"
 	"github.com/fdcs99/biligo/internal/panelauth"
@@ -52,6 +53,7 @@ type runtimeState struct {
 	logger     *applog.Logger
 	store      *store.Store
 	runner     *runner.Manager
+	bwsRunner  *bwsrunner.Manager
 	server     *http.Server
 	listener   net.Listener
 	serverDone chan error
@@ -297,6 +299,15 @@ func newRuntime(ctx context.Context, configPath string, consoleWriter io.Writer)
 	if len(pausedTasks) > 0 {
 		logger.Warnf("启动时自动停止 %d 个上次未结束任务。", len(pausedTasks))
 	}
+	pausedBWSTasks, err := db.PauseInterruptedBWSTasks(ctx)
+	if err != nil {
+		_ = db.Close()
+		_ = closeFile(logFile)
+		return nil, fmt.Errorf("pause interrupted BWS tasks: %w", err)
+	}
+	if len(pausedBWSTasks) > 0 {
+		logger.Warnf("启动时自动停止 %d 个上次未结束 BWS 预约任务。", len(pausedBWSTasks))
+	}
 
 	httpRuntime := httpapi.NewRuntime(db, panelauth.NewManager(cfg.Auth.Password, 24*time.Hour), logger, routerOptions...)
 	return &runtimeState{
@@ -305,6 +316,7 @@ func newRuntime(ctx context.Context, configPath string, consoleWriter io.Writer)
 		logger:     logger,
 		store:      db,
 		runner:     httpRuntime.Runner,
+		bwsRunner:  httpRuntime.BWSRunner,
 		server:     &http.Server{Handler: httpRuntime.Router},
 		serverDone: make(chan error, 1),
 	}, nil
@@ -329,6 +341,11 @@ func (r *runtimeState) stop(ctx context.Context) error {
 	var result error
 	if r.runner != nil {
 		if err := r.runner.StopAll(ctx); err != nil {
+			result = err
+		}
+	}
+	if r.bwsRunner != nil {
+		if err := r.bwsRunner.StopAll(ctx); err != nil && result == nil {
 			result = err
 		}
 	}
